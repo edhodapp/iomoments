@@ -18,8 +18,10 @@ from iomoments_ontology.types import (
     Cardinality,
     Description,
     ModuleStatus,
+    PerfDirection,
     Priority,
     PropertyKind,
+    RequirementStatus,
     SafeId,
     ShortName,
 )
@@ -66,14 +68,79 @@ class Relationship(BaseModel):
 class DomainConstraint(BaseModel):
     """A domain-level invariant or business rule.
 
-    Phase 1 shape — SysE traceability fields (rationale,
-    implementation_refs, verification_refs, status) arrive in Phase 2.
+    Phase 2 (D009) added SysE traceability fields so an external
+    reviewer can audit any constraint end-to-end without context-
+    switching into the codebase:
+
+    - ``rationale``: decision pointer (DECISIONS.md D-entry,
+      requirement row ID, or free-text if no formal origin exists).
+      Empty string marks an orphan constraint; the audit tool
+      (Phase 6) flags those for author attention.
+    - ``implementation_refs``: zero-or-more ``file:symbol`` strings
+      naming the code that realizes the constraint. Empty list plus
+      ``status="spec"`` means "written but not built yet." Refs are
+      resolved by the audit tool against the working tree.
+    - ``verification_refs``: zero-or-more pointers to a test,
+      measurement, or gate proving the constraint holds. Empty list
+      alongside ``status="tested"`` or ``"implemented"`` is a
+      provable lie — the audit tool flags it.
+    - ``status``: requirement lifecycle position. Default ``spec``
+      because a newly-authored constraint is, until proven, just a
+      written-down intent.
     """
 
     name: str
     description: str
     entity_ids: list[str] = []
     expression: str = ""
+    rationale: str = ""
+    implementation_refs: list[str] = []
+    verification_refs: list[str] = []
+    status: RequirementStatus = "spec"
+
+
+class PerformanceConstraint(BaseModel):
+    """A quantitative performance budget the system must satisfy.
+
+    Distinct from ``DomainConstraint`` because perf rows need the
+    budget *number* as first-class data rather than a string in the
+    description — the audit tool compares measured values against
+    these budgets directly, and the perf-ratchet (future D-entry)
+    reads them as its baselines.
+
+    - ``metric``: short identifier emitted by the measurement harness
+      (e.g., ``pebay_update_cycles``, ``probe_overhead_ns``,
+      ``moments_update_bytes``). Stable across runs; matches the
+      harness output key.
+    - ``budget``: numeric value the metric is compared against.
+    - ``unit``: human-readable unit (``ns``, ``cycles``,
+      ``bytes_per_sample``, ``samples_per_sec``). Free-text — the
+      measurement harness is authoritative on actual units.
+    - ``direction``: comparison direction; see ``PerfDirection``.
+    - ``measured_via``: where the measurement comes from (bcc perf
+      subsystem, microbenchmark harness, pre-push gate).
+    - ``rationale`` / ``implementation_refs`` / ``verification_refs``
+      / ``status`` have the same SysE-traceability semantics as on
+      ``DomainConstraint``.
+
+    A row with ``status="implemented"`` means we have a budget AND a
+    measured value that satisfies ``direction(budget)``. The measured
+    value itself is NOT stored here — it lives in whatever perf-
+    history artifact the audit tool reads at review time.
+    """
+
+    name: str
+    description: str
+    entity_ids: list[str] = []
+    metric: str
+    budget: float
+    unit: str
+    direction: PerfDirection
+    measured_via: str = ""
+    rationale: str = ""
+    implementation_refs: list[str] = []
+    verification_refs: list[str] = []
+    status: RequirementStatus = "spec"
 
 
 # --- Solution domain -----------------------------------------------------
@@ -148,6 +215,7 @@ class Ontology(BaseModel):
     entities: list[Entity] = []
     relationships: list[Relationship] = []
     domain_constraints: list[DomainConstraint] = []
+    performance_constraints: list[PerformanceConstraint] = []
     modules: list[ModuleSpec] = []
     data_models: list[DataModel] = []
     external_dependencies: list[ExternalDependency] = []

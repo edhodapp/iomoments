@@ -17,7 +17,11 @@ from pydantic import StringConstraints
 SafeId = Annotated[
     str,
     StringConstraints(
-        pattern=r"^[a-zA-Z0-9_-]+$",
+        # First char must be alnum or underscore: prevents IDs like
+        # "-rf" from being mistaken for CLI flags when passed through
+        # shell tooling. Matches fireasmserver's hardened pattern so
+        # cross-project audit unification (D009) stays viable.
+        pattern=r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$",
         max_length=100,
     ),
 ]
@@ -27,9 +31,10 @@ ShortName = Annotated[
     StringConstraints(max_length=100),
 ]
 
+# 4000-char cap matches fireasmserver so snapshots can cross-round-trip.
 Description = Annotated[
     str,
-    StringConstraints(max_length=2000),
+    StringConstraints(max_length=4000),
 ]
 
 # --- Literal enum-like types ---------------------------------------------
@@ -59,3 +64,36 @@ ModuleStatus = Literal[
 ]
 
 Priority = Literal["low", "medium", "high"]
+
+# -- SysE traceability lifecycle (Phase 2, D009) --------------------------
+#
+# Position of a requirement (DomainConstraint or PerformanceConstraint)
+# in its lifecycle. Values mirror fireasmserver's RequirementStatus so
+# cross-project audit tooling can unify them later.
+#
+#   spec         - written down but no enforcement code or test yet.
+#   tested       - a test exists and passes; enforcement code may be
+#                  present but hasn't been cross-verified by mutation.
+#   implemented  - enforcement code + test + (where applicable) the
+#                  measured value meets the stated budget/invariant.
+#   deviation    - the system does NOT satisfy the requirement as
+#                  written; the rationale field explains why, and the
+#                  audit tool flags this row for human review.
+#   n_a          - not applicable to the current build / platform
+#                  profile; retained for traceability against the
+#                  originating decision.
+RequirementStatus = Literal[
+    "spec",
+    "tested",
+    "implemented",
+    "deviation",
+    "n_a",
+]
+
+# Direction of a PerformanceConstraint's budget comparison.
+#   max    - measured value MUST be ≤ budget (latency, instruction count,
+#            per-sample overhead).
+#   min    - measured value MUST be ≥ budget (throughput, samples/sec).
+#   equal  - measured value MUST equal budget exactly. Rare; used for
+#            protocol constants or fixed-point scale invariants.
+PerfDirection = Literal["max", "min", "equal"]
