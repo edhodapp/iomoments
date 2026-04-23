@@ -16,7 +16,14 @@ dependencies = [
     # python_agent / fireasmserver lineage; pydantic v1 would force a
     # schema-model rewrite on every port.
     "pydantic>=2.6",
+    # YAML as the human-authoring surface for the ontology source
+    # (D009 Phase 5). The DAG persistence format stays JSON; YAML is
+    # only the input to the builder.
+    "pyyaml>=6.0",
 ]
+
+[project.scripts]
+build-iomoments-ontology = "iomoments_ontology.build:main"
 
 [project.optional-dependencies]
 dev = [
@@ -28,6 +35,8 @@ dev = [
     # scipy ≥ 1.17 still doesn't ship inline stubs; scipy-stubs is the
     # community-maintained counterpart used by numpy-adjacent projects.
     "scipy-stubs>=1.17",
+    # PyYAML's inline stubs live in the types-PyYAML package.
+    "types-PyYAML>=6.0",
 ]
 
 [build-system]

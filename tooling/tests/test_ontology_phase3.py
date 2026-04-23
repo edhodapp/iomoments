@@ -260,12 +260,17 @@ def test_transaction_serializes_concurrent_workers(
 
     # Intervals sorted by acquire-time: each next acquire must be ≥
     # the prior release. Disjoint intervals = the lock serialized.
+    # Tolerance absorbs wall-clock jitter across processes (~ms); a
+    # genuinely broken lock would produce ≥40ms overlap (the 50ms
+    # hold minus scheduler latency), well above the tolerance.
+    tolerance_s = 0.010
     for (_, prev_release), (curr_acquire, _) in zip(
         intervals, intervals[1:],
     ):
-        assert curr_acquire >= prev_release, (
-            f"transactions overlapped: prev released at "
-            f"{prev_release}, next acquired at {curr_acquire}"
+        assert curr_acquire >= prev_release - tolerance_s, (
+            f"transactions overlapped by more than {tolerance_s}s: "
+            f"prev released at {prev_release}, next acquired at "
+            f"{curr_acquire}"
         )
 
     reloaded = load_dag(dag_path, project_name="iomoments")
