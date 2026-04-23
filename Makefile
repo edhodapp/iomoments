@@ -17,7 +17,7 @@ FLAKE8          := $(VENV)/bin/flake8
 # place.
 PYLINTRC        := pylintrc
 
-PY_SOURCES      := $(shell find tests -type f -name '*.py' 2>/dev/null)
+PY_SOURCES      := $(shell find tests tooling -type f -name '*.py' 2>/dev/null)
 
 # ---------------------------------------------------------------------------
 # C toolchain. Flag set per D008: dual-compiler compile-as-lint for userland,

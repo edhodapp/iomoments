@@ -385,3 +385,125 @@ compilation unit, not a crypto test harness with many drivers.
 **Status:** decision logged; implementation happens at repo bootstrap
 per the "minimum commit to establish the pipeline" plan in
 `CD-PIPELINE-PROPOSAL.md` §8. No code exists yet to lint.
+
+## 2026-04-23
+
+### D009: Ontology DAG as formal verifiable requirements — parallel fork from python_agent
+
+**Decision.** iomoments adopts the **ontology-as-formal-verifiable-
+requirements** primitive described in fireasmserver D049: a Pydantic-
+typed artifact where each DAG *node* is a complete project-ontology
+snapshot (entities, relationships, constraints, module specs, open
+questions) and each DAG *edge* carries a `Decision` record (question,
+options, chosen, rationale). Git tracks source-level change at file
+granularity; the ontology DAG tracks graph-structural change at
+constraint granularity plus parallel-design multiplicity (multiple
+alternative designs can coexist as sibling branches off one parent).
+
+Per ~/.claude/CLAUDE.md: Ed confirmed 2026-04-23 that `python_agent`
+has been **tabled indefinitely**, and iomoments is a parallel
+implementation meant to share designs with `fireasmserver` (also
+tabled from python_agent's perspective as of 2026-04-19 per its
+D049). Lessons crystallizing across the two forks become candidates
+for a future standardization effort when it picks up again; neither
+fork waits on the other.
+
+**Fork strategy (Option D from the 2026-04-23 proposal).** Baseline
+comes from `python_agent/src/python_agent/ontology.py` +
+`dag_utils.py` + `types.py` (AGPL-3.0-or-later, compatible with
+iomoments' D001 license). Cherry-pick set from fireasmserver:
+
+1. **SysE-grade traceability fields** on `DomainConstraint` —
+   `rationale`, `implementation_refs`, `verification_refs`, `status`
+   (one of `spec`/`tested`/`implemented`/`deviation`/`n_a`). Phase 2.
+2. **`PerformanceConstraint` type** — first-class `metric` / `budget`
+   / `unit` / `direction` / `measured_via` fields so measurement-vs-
+   budget gaps are a single-tool-reachable concern, not buried in
+   description text. Phase 2.
+3. **Content-hash idempotent snapshot append** — no-op re-runs don't
+   pollute the DAG (compute ontology content hash, compare against
+   parent, append only when changed). Phase 3.
+4. **Git cross-reference in snapshot labels** — embed current HEAD
+   SHA + `+dirty` marker if the working tree has uncommitted changes,
+   so any DAG snapshot locates back to the source context in one
+   `git show`. Phase 3.
+5. **`dag_transaction` context manager with `fcntl.flock`** — load-
+   modify-save serialization across concurrent builder processes so
+   parallel sessions can't lose each other's updates. Phase 3.
+6. **HMAC integrity signing and LLM prompt-injection scan REMOVED**
+   — trusted in-repo builder per fireasmserver's same rationale. If
+   iomoments ever loads DAGs from a less-trusted source (an agent,
+   an external contributor), port the machinery back.
+
+**iomoments-specific extensions** (approved for build-out; draft-
+first, crystallize with real friction per fireasmserver D021):
+
+1. **`DiagnosticSignal`** — new type for probe-phase outputs
+   (Carleman partial sum, Hankel conditioning, Hill tail-index
+   estimator, KS p-value, half-split moment stability). Each carries
+   a measurement method + threshold + verdict contribution. Different
+   semantics from `PerformanceConstraint` (validity indicator, not
+   budget). Phase 4.
+2. **`VerdictNode`** — Green/Yellow/Amber/Red vertices with entrance
+   criteria expressed in terms of `DiagnosticSignal` thresholds. The
+   iomoments signature artifact per D007's load-bearing diagnostic
+   layer. Phase 4.
+3. **`MomentRepresentation`** — property/attribute capturing whether
+   a moment is in raw space or log-space (D006 chose to emit both),
+   plus its order k. Either a new top-level type or a constrained
+   `Property` — decide in Phase 4 against the first real usage.
+
+**Phased build-out.** Seven commits per the 2026-04-23 task plan:
+P1 baseline fork (this commit, D009 entry); P2 SysE extensions; P3
+DAG concurrency + content-hash + git-SHA; P4 iomoments-specific
+types; P5 initial `iomoments-ontology.json` + builder; P6
+`audit-ontology` package; P7 wire audit into pre-push (with its own
+D010 entry). Each phase ships with tests and a clean-Claude review
+before landing.
+
+**Draft-first discovery (inherited principle from fireasmserver
+D021).** The ontology is NOT written waterfall-style before code.
+D009's initial ontology (Phase 5) captures what is known *today*
+from D001–D008 — platform, algorithm, language split, thesis, lint
+discipline. As implementation reveals new constraints
+(testability limits, hardware quirks, BPF verifier subtleties,
+moment-stability edge cases), they crystallize into the ontology
+at the moment of discovery; the audit gate picks them up on the
+next commit and verifies them forever after.
+
+**Three-level verification** (D021's adapted DO-178C pattern) is
+the aspirational shape once enough real enforcement code exists —
+for each `DomainConstraint`: (a) traceability (test named after
+the constraint), (b) structural coverage (test actually runs
+enforcement code), (c) mutation verification (mutating enforcement
+breaks test). Phase 6 `audit-ontology` implements level (a) at
+minimum; (b)/(c) are bigger commitments deferred until there's
+enough real C/Python enforcement to mutation-test.
+
+**Prior-art scope.** fireasmserver D049 identified Ed's own
+`github.com/edhodapp/python-agent` as the base-shape prior art;
+iomoments inherits that acknowledgement. iomoments-specific
+extensions (DiagnosticSignal, VerdictNode, MomentRepresentation)
+are new to this fork; framing them as "novel" against the broader
+moment-problem / diagnostic-statistics literature requires review,
+not claim.
+
+**Not in this decision's scope** (separate D-entries as they land):
+- Audit-tool policy + pre-push wiring — D010, landing with Phase 7.
+- Schema extensions beyond the ones named here — added under the
+  D009 umbrella without new D-entries.
+
+**Cross-refs:**
+- D007 — core thesis; `VerdictNode` is the load-bearing artifact.
+- D006 — Pébay algorithm; shape of the moment update is what the
+  ontology's constraints and diagnostic signals are about.
+- D005 — language split; the ontology lives in Python (tooling side),
+  not C, so lint/mypy coverage applies.
+- D008 — C lint stack; the ontology's `implementation_refs` can
+  point at C symbols, which the Phase 6 audit must resolve via
+  ctags or equivalent (design decision for Phase 6).
+- fireasmserver D021 / D049 / D051 — the pattern being re-derived.
+- python_agent (tabled) — the baseline that was forked.
+
+**Status:** P1 shipped (this commit). P2–P7 tracked in the active
+task list; expect ~1 commit per phase.

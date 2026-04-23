@@ -12,6 +12,10 @@ authors = [{ name = "Ed Hodapp", email = "ed@hodapp.com" }]
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.13",
+    # pydantic v2 for the ontology schema (D009). Matches the
+    # python_agent / fireasmserver lineage; pydantic v1 would force a
+    # schema-model rewrite on every port.
+    "pydantic>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -30,30 +34,39 @@ dev = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# Package layout: the Python code lives under tooling/src/, imported by
+# short name (e.g., `iomoments_ontology`). Tests under tooling/tests/
+# reference these imports directly; tests under tests/ cover the
+# numerical oracle and don't depend on the ontology package.
+[tool.setuptools]
+package-dir = { "" = "tooling/src" }
+
+[tool.setuptools.packages.find]
+where = ["tooling/src"]
+
 # ---------------------------------------------------------------------------
 # pytest: branch coverage is mandatory. 100% is the aspirational target;
 # configure the gate floor conservatively and tighten as the oracle matures.
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["tests"]
+testpaths = ["tests", "tooling/tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
     "-ra",
     "--cov=tests",
+    "--cov=iomoments_ontology",
     "--cov-branch",
     "--cov-report=term-missing",
 ]
 
 [tool.coverage.run]
 branch = true
-# Coverage is measured on `tests/` deliberately: Python IS the oracle here
-# (D005). The code under measurement is the reference implementation, not
-# a tested product — so branch coverage of the oracle itself is the
-# quantity we care about. When a Python `src/` layer appears (e.g., a
-# loader or CLI frontend), add it to this list.
-source = ["tests"]
+# Coverage is measured on `tests/` (Python oracle — D005) and the
+# `iomoments_ontology` package (the formal-requirements infrastructure
+# — D009). When the C userland grows a Python frontend, add it here.
+source = ["tests", "iomoments_ontology"]
 
 [tool.coverage.report]
 show_missing = true
@@ -68,11 +81,14 @@ skip_covered = false
 [tool.mypy]
 strict = true
 python_version = "3.11"
-files = ["tests"]
+files = ["tests", "tooling/src", "tooling/tests"]
 warn_unused_configs = true
 warn_return_any = true
 warn_unreachable = true
 disallow_any_unimported = true
+# The ontology package is installed as a namespace under tooling/src/;
+# tell mypy where to look so it resolves intra-package imports.
+mypy_path = "tooling/src"
 
 # numpy/scipy ship their own stubs in current versions; if an older
 # environment misses them, install types-* stubs rather than setting
