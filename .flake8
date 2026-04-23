@@ -1,0 +1,4 @@
+[flake8]
+max-complexity = 5
+max-line-length = 79
+extend-exclude = .venv, build, dist, *.egg-info

@@ -1,0 +1,67 @@
+name: ci
+
+# Mirrors the pre-commit + pre-push gates so a PR or push that bypassed
+# the local hooks still gets caught. No Gemini review in CI (credential
+# scope + rate limits) — clean-Claude + Gemini are local-only.
+#
+# C-side matrix lands with the first C translation unit per D008.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-gates:
+    name: Python quality gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project + dev deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -e '.[dev]'
+
+      - name: flake8
+        run: flake8 tests
+
+      - name: pylint
+        # Uses the repo-committed pylintrc rather than ~/.claude/pylintrc,
+        # which doesn't exist on CI. When this project needs pylint-
+        # specific tweaks, copy ~/.claude/pylintrc into ./pylintrc and
+        # diverge from there.
+        run: |
+          if [ -f pylintrc ]; then
+            pylint --rcfile=pylintrc tests
+          else
+            echo "::warning::no pylintrc at repo root; skipping pylint."
+          fi
+
+      - name: mypy --strict
+        run: mypy --strict tests
+
+      - name: pytest --cov --cov-branch
+        run: pytest
+
+  shell-gates:
+    name: Shell script lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          find tooling -type f -name '*.sh' -print0 | xargs -0 -r shellcheck

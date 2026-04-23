@@ -1,0 +1,83 @@
+[project]
+name = "iomoments-oracle"
+version = "0.0.0"
+description = "Python numerical oracle and test harness for iomoments. Not a shipped artifact."
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Ed Hodapp", email = "ed@hodapp.com" }]
+
+# Hard floor: Python 3.11 (matches global CLAUDE.md). Dev-only; nothing
+# published to PyPI. scipy + numpy are the reference-math dependencies for
+# the Pébay oracle; pytest / mypy / pylint / flake8 are the gate tools.
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mypy>=1.11",
+    "pylint>=3.2",
+    "flake8>=7.1",
+    # scipy ≥ 1.17 still doesn't ship inline stubs; scipy-stubs is the
+    # community-maintained counterpart used by numpy-adjacent projects.
+    "scipy-stubs>=1.17",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# pytest: branch coverage is mandatory. 100% is the aspirational target;
+# configure the gate floor conservatively and tighten as the oracle matures.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+    "--cov=tests",
+    "--cov-branch",
+    "--cov-report=term-missing",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["tests"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# fail_under tightens as the oracle lands. Left unset today so the
+# deliberately failing hello-world doesn't double-fail on coverage.
+
+# ---------------------------------------------------------------------------
+# mypy --strict. Global rule; no per-file escapes without an inline
+# comment naming the concrete reason.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["tests"]
+warn_unused_configs = true
+warn_return_any = true
+warn_unreachable = true
+disallow_any_unimported = true
+
+# numpy/scipy ship their own stubs in current versions; if an older
+# environment misses them, install types-* stubs rather than setting
+# ignore_missing_imports globally.
+
+# ---------------------------------------------------------------------------
+# flake8 has no native pyproject support (as of flake8 7.x); it reads
+# setup.cfg or .flake8. The .flake8 file at repo root carries the config.
+# Kept here in a comment for discoverability.
+# ---------------------------------------------------------------------------
+# [tool.flake8]
+# max-complexity = 5
+# max-line-length = 79
