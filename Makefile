@@ -119,18 +119,18 @@ lint-c: lint-c-compile lint-c-tidy lint-c-cppcheck lint-c-scanbuild
 lint-c-compile:
 	@if [ -z "$(C_SOURCES)$(BPF_SOURCES)" ]; then \
 		echo "(no C sources to lint.)"; \
-		exit 0; \
+	else \
+		for f in $(C_SOURCES); do \
+			echo "gcc lint   $$f"; \
+			$(CC_GCC) -c -o /dev/null $(CFLAGS_LINT_GCC) $$f || exit 1; \
+			echo "clang lint $$f"; \
+			$(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_CLANG) $$f || exit 1; \
+		done; \
+		for f in $(BPF_SOURCES); do \
+			echo "clang lint (bpf) $$f"; \
+			$(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_BPF) $$f || exit 1; \
+		done; \
 	fi
-	@for f in $(C_SOURCES); do \
-		echo "gcc lint   $$f"; \
-		$(CC_GCC) -c -o /dev/null $(CFLAGS_LINT_GCC) $$f || exit 1; \
-		echo "clang lint $$f"; \
-		$(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_CLANG) $$f || exit 1; \
-	done
-	@for f in $(BPF_SOURCES); do \
-		echo "clang lint (bpf) $$f"; \
-		$(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_BPF) $$f || exit 1; \
-	done
 
 # Engine 2: clang-tidy. Userland and BPF invocations differ; BPF needs
 # -target bpf and the CO-RE header path (added as it exists). The
@@ -139,17 +139,17 @@ lint-c-compile:
 lint-c-tidy:
 	@if [ -z "$(C_SOURCES)$(BPF_SOURCES)" ]; then \
 		echo "(no C sources for clang-tidy.)"; \
-		exit 0; \
+	else \
+		for f in $(C_SOURCES); do \
+			echo "clang-tidy $$f"; \
+			$(CLANG_TIDY) --warnings-as-errors='*' $$f -- -std=c11 -Isrc || exit 1; \
+		done; \
+		for f in $(BPF_SOURCES); do \
+			echo "clang-tidy (bpf) $$f"; \
+			$(CLANG_TIDY) --warnings-as-errors='*' $$f \
+			  -- -target bpf -std=c11 -Isrc -D__TARGET_ARCH_x86 || exit 1; \
+		done; \
 	fi
-	@for f in $(C_SOURCES); do \
-		echo "clang-tidy $$f"; \
-		$(CLANG_TIDY) --warnings-as-errors='*' $$f -- -std=c11 -Isrc || exit 1; \
-	done
-	@for f in $(BPF_SOURCES); do \
-		echo "clang-tidy (bpf) $$f"; \
-		$(CLANG_TIDY) --warnings-as-errors='*' $$f \
-		  -- -target bpf -std=c11 -Isrc -D__TARGET_ARCH_x86 || exit 1; \
-	done
 
 # Engine 3: cppcheck. Value-agnostic defects, uninitialized reads,
 # mismatched allocator pairs. Globally suppress unmatched-suppression
@@ -157,15 +157,15 @@ lint-c-tidy:
 lint-c-cppcheck:
 	@if [ -z "$(C_ALL)" ]; then \
 		echo "(no C sources for cppcheck.)"; \
-		exit 0; \
+	else \
+		$(CPPCHECK) --enable=all --inconclusive --std=c11 \
+		  --error-exitcode=1 \
+		  --suppressions-list=$(CPPCHECK_SUPPRESS) \
+		  --suppress=missingIncludeSystem \
+		  --suppress=unmatchedSuppression \
+		  --suppress=checkersReport \
+		  $(C_ALL); \
 	fi
-	$(CPPCHECK) --enable=all --inconclusive --std=c11 \
-	  --error-exitcode=1 \
-	  --suppressions-list=$(CPPCHECK_SUPPRESS) \
-	  --suppress=missingIncludeSystem \
-	  --suppress=unmatchedSuppression \
-	  --suppress=checkersReport \
-	  $(C_ALL)
 
 # Engine 4: scan-build. Path-sensitive symbolic execution beyond what
 # clang-tidy's in-process analyzer runs. Userland only — the symbolic
@@ -179,13 +179,13 @@ lint-c-cppcheck:
 lint-c-scanbuild:
 	@if [ -z "$(C_SOURCES)" ]; then \
 		echo "(no userland C sources for scan-build.)"; \
-		exit 0; \
+	else \
+		for f in $(C_SOURCES); do \
+			echo "scan-build $$f"; \
+			$(SCAN_BUILD) --status-bugs -maxloop 8 \
+			  $(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_CLANG) $$f || exit 1; \
+		done; \
 	fi
-	@for f in $(C_SOURCES); do \
-		echo "scan-build $$f"; \
-		$(SCAN_BUILD) --status-bugs -maxloop 8 \
-		  $(CC_CLANG) -c -o /dev/null $(CFLAGS_LINT_CLANG) $$f || exit 1; \
-	done
 
 # ---------------------------------------------------------------------------
 # clang-format — pre-commit gate runs this on staged files; this target
@@ -194,9 +194,9 @@ lint-c-scanbuild:
 fmt-check:
 	@if [ -z "$(C_ALL)" ]; then \
 		echo "(no C files to format-check.)"; \
-		exit 0; \
+	else \
+		$(CLANG_FORMAT) --dry-run --Werror $(C_ALL); \
 	fi
-	$(CLANG_FORMAT) --dry-run --Werror $(C_ALL)
 
 # ---------------------------------------------------------------------------
 # BPF verifier load — the ultimate static gate (D008). No .bpf.c exists
@@ -206,11 +206,11 @@ fmt-check:
 bpf-verify:
 	@if [ -z "$(BPF_SOURCES)" ]; then \
 		echo "(no BPF sources; bpf-verify is a no-op today.)"; \
-		exit 0; \
+	else \
+		echo "ERROR: BPF sources present but bpf-verify is not yet implemented." >&2; \
+		echo "  Wire: clang -target bpf -> iomoments.bpf.o -> bpftool prog load." >&2; \
+		exit 1; \
 	fi
-	@echo "ERROR: BPF sources present but bpf-verify is not yet implemented." >&2
-	@echo "  Wire: clang -target bpf -> iomoments.bpf.o -> bpftool prog load." >&2
-	@exit 1
 
 # ---------------------------------------------------------------------------
 # Meta.
