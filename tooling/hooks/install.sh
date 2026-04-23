@@ -24,10 +24,15 @@ install_hook() {
     local src="$TOOL_DIR/${name}.sh"
     local dst="$HOOKS_DIR/$name"
 
-    if [ ! -x "$src" ]; then
-        echo "ERROR: $src missing or not executable." >&2
+    if [ ! -f "$src" ]; then
+        echo "ERROR: $src missing." >&2
         return 1
     fi
+
+    # Fresh clones on filesystems that drop the execute bit (WSL with
+    # some configurations, CRLF-conversion checkouts) land here without
+    # +x. Set it explicitly rather than failing.
+    chmod +x "$src"
 
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
         echo "ERROR: $dst exists and is not a symlink." >&2

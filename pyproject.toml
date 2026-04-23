@@ -48,6 +48,11 @@ addopts = [
 
 [tool.coverage.run]
 branch = true
+# Coverage is measured on `tests/` deliberately: Python IS the oracle here
+# (D005). The code under measurement is the reference implementation, not
+# a tested product — so branch coverage of the oracle itself is the
+# quantity we care about. When a Python `src/` layer appears (e.g., a
+# loader or CLI frontend), add it to this list.
 source = ["tests"]
 
 [tool.coverage.report]

@@ -4,12 +4,17 @@
 # the first C translation unit (per DECISIONS.md D008).
 
 VENV            := .venv
+VENV_STAMP      := $(VENV)/.installed
 PY              := $(VENV)/bin/python
 PYTEST          := $(VENV)/bin/pytest
 MYPY            := $(VENV)/bin/mypy
 PYLINT          := $(VENV)/bin/pylint
 FLAKE8          := $(VENV)/bin/flake8
-PYLINTRC        := $(HOME)/.claude/pylintrc
+# Repo-committed pylintrc is the sole authority. Matches CI. No fallback
+# to $(HOME)/.claude/pylintrc: a silent local pass while CI fails on the
+# same commit defeats the purpose of committing the rcfile in the first
+# place.
+PYLINTRC        := pylintrc
 
 PY_SOURCES      := $(shell find tests -type f -name '*.py' 2>/dev/null)
 
@@ -28,22 +33,30 @@ help:
 	@echo "  clean          Remove caches."
 	@echo "  distclean      clean + remove .venv."
 
-$(VENV)/bin/python:
-	python3 -m venv $(VENV)
+# Stamp file tracks the last successful install. Rebuilds whenever
+# pyproject.toml changes so dep additions take effect without requiring
+# `make distclean && make venv` first.
+$(VENV_STAMP): pyproject.toml
+	@if [ ! -d "$(VENV)" ]; then python3 -m venv $(VENV); fi
 	$(VENV)/bin/pip install --upgrade pip wheel >/dev/null
 	$(VENV)/bin/pip install -e '.[dev]'
+	@touch $(VENV_STAMP)
 
-venv: $(VENV)/bin/python
+venv: $(VENV_STAMP)
 
 install-hooks:
 	tooling/hooks/install.sh
 
-test: venv
+test: $(VENV_STAMP)
 	$(PYTEST)
 
 lint: lint-python
 
-lint-python: venv
+lint-python: $(VENV_STAMP)
+	@if [ ! -f "$(PYLINTRC)" ]; then \
+		echo "ERROR: $(PYLINTRC) missing — refusing to lint without it." >&2; \
+		exit 1; \
+	fi
 	@if [ -z "$(PY_SOURCES)" ]; then \
 		echo "(no Python sources to lint.)"; \
 		exit 0; \

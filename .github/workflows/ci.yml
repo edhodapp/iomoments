@@ -37,16 +37,15 @@ jobs:
         run: flake8 tests
 
       - name: pylint
-        # Uses the repo-committed pylintrc rather than ~/.claude/pylintrc,
-        # which doesn't exist on CI. When this project needs pylint-
-        # specific tweaks, copy ~/.claude/pylintrc into ./pylintrc and
-        # diverge from there.
+        # Uses the repo-committed pylintrc (snapshot of the Google style
+        # rcfile). Fails loudly if missing — silent skip would violate
+        # the global "all Python passes pylint" rule.
         run: |
-          if [ -f pylintrc ]; then
-            pylint --rcfile=pylintrc tests
-          else
-            echo "::warning::no pylintrc at repo root; skipping pylint."
+          if [ ! -f pylintrc ]; then
+            echo "::error::pylintrc missing at repo root — pylint gate can't run."
+            exit 1
           fi
+          pylint --rcfile=pylintrc tests
 
       - name: mypy --strict
         run: mypy --strict tests

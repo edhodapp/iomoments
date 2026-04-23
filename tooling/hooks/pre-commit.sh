@@ -14,10 +14,13 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM \
-              | grep -E '\.py$' || true)
-STAGED_C=$(git diff --cached --name-only --diff-filter=ACM \
-             | grep -E '\.(c|h|bpf\.c)$' || true)
+# Arrays, not whitespace-split strings: paths with spaces break otherwise.
+# Newlines in paths remain pathological (they'd break mapfile too) but git
+# refuses them in normal workflows.
+mapfile -t STAGED_PY < <(git diff --cached --name-only --diff-filter=ACM \
+                          | grep -E '\.py$' || true)
+mapfile -t STAGED_C < <(git diff --cached --name-only --diff-filter=ACM \
+                         | grep -E '\.(c|h|bpf\.c)$' || true)
 
 FAILED=0
 
@@ -25,7 +28,7 @@ FAILED=0
 # Stage 1a — Python quality gates (flake8, pylint, mypy --strict, pytest).
 # Delegated to the shared tool; the tool no-ops if no .py is staged.
 # ---------------------------------------------------------------------------
-if [ -n "$STAGED_PY" ]; then
+if [ "${#STAGED_PY[@]}" -gt 0 ]; then
     echo ">>> Python gates"
     if ! "$HOME/tools/code-review/run-python-gates.sh"; then
         FAILED=1
@@ -36,7 +39,7 @@ fi
 # Stage 1b — clang-format check on staged C (formatting only; lint engines
 # run at pre-push per D008). .clang-format lands with the first C source.
 # ---------------------------------------------------------------------------
-if [ -n "$STAGED_C" ]; then
+if [ "${#STAGED_C[@]}" -gt 0 ]; then
     echo ">>> clang-format"
     if [ ! -f ".clang-format" ]; then
         echo "ERROR: C files staged but .clang-format missing." >&2
@@ -46,8 +49,7 @@ if [ -n "$STAGED_C" ]; then
         echo "ERROR: clang-format not installed." >&2
         FAILED=1
     else
-        # shellcheck disable=SC2086  # word-splitting is intentional: one arg per file.
-        if ! clang-format --dry-run --Werror $STAGED_C; then
+        if ! clang-format --dry-run --Werror "${STAGED_C[@]}"; then
             FAILED=1
         fi
     fi
@@ -66,15 +68,14 @@ fi
 # Findings print; commit proceeds regardless. The clean-Claude subagent
 # review happens in the Claude Code session, not in this hook.
 # ---------------------------------------------------------------------------
-STAGED_REVIEW=$(git diff --cached --name-only --diff-filter=ACM \
-                  | grep -E '\.(py|c|h|bpf\.c|S)$' || true)
+mapfile -t STAGED_REVIEW < <(git diff --cached --name-only --diff-filter=ACM \
+                              | grep -E '\.(py|c|h|bpf\.c|S)$' || true)
 
-if [ -n "$STAGED_REVIEW" ]; then
+if [ "${#STAGED_REVIEW[@]}" -gt 0 ]; then
     echo ""
     echo ">>> Gemini review (advisory)"
     # 120s per the known-hang-mode guidance in global CLAUDE.md.
-    # shellcheck disable=SC2086
-    timeout 120 "$HOME/tools/code-review/gemini-review.sh" $STAGED_REVIEW \
+    timeout 120 "$HOME/tools/code-review/gemini-review.sh" "${STAGED_REVIEW[@]}" \
         || echo "  (Gemini review timed out or errored — advisory, not blocking.)"
 fi
 
