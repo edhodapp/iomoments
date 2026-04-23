@@ -1,0 +1,79 @@
+# iomoments code style — derived from Linux kernel coding style
+# (Documentation/process/coding-style.rst), not copied from any sibling
+# project. Kernel style is the right basis because BPF C idioms are
+# kernel-adjacent and libbpf / CO-RE code in circulation follows it.
+#
+# Divergences from pure kernel style are called out inline.
+
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Kernel-style indentation: hard tabs, 8-wide.
+UseTab:          Always
+TabWidth:        8
+IndentWidth:     8
+ContinuationIndentWidth: 8
+
+# Braces: K&R / Linus style — opening brace on same line as
+# control statement, on its own line for function definitions.
+BreakBeforeBraces: Linux
+
+# One true statement per line; no single-line ifs/for/while bodies
+# collapsed onto the same line.
+AllowShortIfStatementsOnASingleLine:    Never
+AllowShortLoopsOnASingleLine:           false
+AllowShortFunctionsOnASingleLine:       None
+AllowShortBlocksOnASingleLine:          Never
+AllowShortCaseLabelsOnASingleLine:      false
+
+# 80-column limit. Hard rule in kernel style; kept as-is. The classical
+# justification (vt100 terminals) is gone but the readability argument
+# (side-by-side diffs on a 1920px display) still applies.
+ColumnLimit:     80
+
+# Pointer / reference alignment: K&R-style `char *p`, not `char* p`.
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+# No alignment tricks that drift when identifiers change length.
+AlignConsecutiveAssignments:    false
+AlignConsecutiveDeclarations:   false
+AlignAfterOpenBracket:          Align
+
+# Preserve includes order as authored. Kernel-style sort groups would
+# help later but the auto-grouping in clang-format is lossy for our
+# common "asm/foo.h" → "linux/bpf.h" → project header layering.
+SortIncludes:    Never
+
+# Case labels align with switch, body indented one level deeper.
+IndentCaseLabels: false
+
+# Space rules that match kernel style.
+SpaceAfterCStyleCast:            false
+SpaceBeforeParens:               ControlStatements
+SpaceInEmptyParentheses:         false
+SpacesInParentheses:             false
+SpacesInSquareBrackets:          false
+SpaceAfterLogicalNot:            false
+
+# Bit-field packing: keep one per line for readability in register
+# layouts (common in BPF map definitions and kernel-adjacent code).
+BitFieldColonSpacing:            Both
+
+# Line-break penalties favor wrapping long strings / long parameter
+# lists over truncating identifiers. Kernel style doesn't specify.
+PenaltyBreakAssignment:          10
+PenaltyBreakBeforeFirstCallParameter: 30
+PenaltyBreakString:              10
+PenaltyExcessCharacter:          100
+
+# Tell clang-format what a function-like macro is so SEC("kprobe/...")
+# and similar libbpf idioms aren't reformatted as function calls.
+StatementMacros:
+  - SEC
+  - __always_inline
+
+# No trailing commas enforced; kernel style tolerates both.
+Standard:        c++03  # C-only, but clang-format's Standard enum is C++-named.
+...

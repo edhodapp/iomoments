@@ -1,0 +1,104 @@
+# iomoments clang-tidy configuration (D008).
+#
+# Check families enabled:
+#   bugprone-*             Real-world defect patterns.
+#   cert-*                 CERT secure coding rules.
+#   clang-analyzer-*       In-process static analyzer (scan-build runs
+#                          the full path-sensitive engine at pre-push).
+#   misc-*                 Assorted correctness checks.
+#   performance-*          Inefficient patterns; some disabled for BPF.
+#   portability-*          Cross-compiler / cross-platform drift.
+#   readability-*          Readability; some disabled to avoid fighting
+#                          kernel-adjacent C idioms.
+#
+# Disables carry inline rationale + what would make the disable
+# unnecessary (principle 5 in DECISIONS.md D008).
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-no-int-to-ptr,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -cert-dcl03-c,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c
+
+# Rationale for each disable (keep in sync with Checks: list above):
+#
+# -bugprone-easily-swappable-parameters
+#   Pébay's moment-update APIs take tuples of same-typed doubles
+#   (n, m1, m2, m3, m4). The check fires on every call site and
+#   suggests refactoring to a struct; we already use structs for the
+#   running summary, and the per-sample update signature is canonical.
+#   Revisit if the Pébay API ever changes shape.
+#
+# -performance-no-int-to-ptr
+#   BPF map-value pointer idioms legitimately cast between integer
+#   values returned from bpf_map_lookup_elem() and typed pointers.
+#   The check can't see the map-type machinery.
+#   Revisit when clang-tidy grows BPF awareness.
+#
+# -readability-magic-numbers
+#   Kernel tracepoint offsets, bit-widths of fixed registers, and
+#   syscall numbers are inherently magic. Defining named constants
+#   for every one buries the arithmetic. Fixed-point scale factors
+#   in Pébay updates are numeric invariants documented in comments.
+#   Revisit if the noise-floor forces more declarative constants.
+#
+# -readability-identifier-length
+#   Flags single-letter loop indices (i, n, k) that match Pébay's
+#   notation. The check's default minimum of 3 chars loses the
+#   signal ("n" meaning "count of samples processed so far" is
+#   clearer than "sample_count" in tight update loops).
+#   Revisit if the oracle code grows past ~500 lines where longer
+#   names aid orientation.
+#
+# -misc-include-cleaner
+#   Demands IWYU-strict includes. libbpf and vmlinux.h are umbrella
+#   headers by design; enforcing granular includes fights both.
+#   Revisit if iomoments ever builds without libbpf.
+#
+# -misc-no-recursion
+#   Verifier rejects all recursion in BPF programs anyway; this is
+#   a userland-only concern and the default is too aggressive for
+#   the tiny recursive helpers common in parser code. Revisit if
+#   userland grows a deep recursive subsystem.
+#
+# -cert-dcl03-c / -cert-dcl37-c / -cert-dcl51-cpp
+#   Reserved-identifier checks that misfire on kernel-standard names
+#   (__u32, __user, __always_inline). Project-specific code that
+#   actually uses reserved names will trigger clang-format-style
+#   review instead. Revisit if we stop targeting kernel headers.
+#
+# -cert-err33-c
+#   Demands every library call's return value be checked. BPF
+#   helpers frequently return void or have non-error returns
+#   (bpf_printk's return we explicitly don't care about). Revisit
+#   on userland code where the I/O path does care about errno.
+
+CheckOptions:
+  # Pébay / moment-update naming follows the Sandia SAND2008-6212
+  # paper (n, M1, M2, M3, M4, delta, delta_n, delta_n2). Allow the
+  # paper's symbols as-is.
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lower_case
+
+# Treat every enabled warning as an error — the gate blocks on
+# anything clang-tidy flags. Suppressions are always inline with
+# rationale (principle 5).
+WarningsAsErrors: '*'
+
+# Only the iomoments tree; don't lint system headers.
+HeaderFilterRegex: '^(src|tests)/'

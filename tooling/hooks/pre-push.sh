@@ -55,22 +55,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# DEFERRED: C-side engines and BPF verifier load. Per D008, these wire in
-# the same commit as the first C translation unit. When that commit lands,
-# this section fills in with:
-#
-#   make lint-c       # dispatches to gcc/clang lint, clang-tidy, cppcheck, scan-build
-#   make bpf-verify   # bpftool prog load against iomoments.bpf.o
-#
-# Until then, the comment itself is the pointer for the next author
-# (probably future-me) so nothing is forgotten.
+# C-side gates — four independent engines plus clang-format, all driven
+# through the Makefile so local and CI run identical invocations. Each
+# target no-ops gracefully when its inputs don't exist (e.g., fmt-check
+# with zero C files), so the guards here are mostly documentation.
 # ---------------------------------------------------------------------------
-C_SOURCES=$(find src -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null || true)
-if [ -n "$C_SOURCES" ]; then
+if [ -d src ]; then
     echo ""
-    echo "WARN: C source present but C-engine pre-push wiring is still deferred." >&2
-    echo "  Implement per DECISIONS.md D008 before this push lands on main." >&2
-    FAILED=1
+    echo ">>> clang-format (whole tree)"
+    if ! make fmt-check; then
+        FAILED=1
+    fi
+
+    echo ""
+    echo ">>> C static analysis (four engines)"
+    if ! make lint-c; then
+        FAILED=1
+    fi
+
+    echo ""
+    echo ">>> BPF verifier load"
+    # Stub today; real bpftool prog load lands with first iomoments.bpf.c.
+    # The Makefile target fails hard if BPF sources exist but the wiring
+    # is incomplete, which is the tripwire we want.
+    if ! make bpf-verify; then
+        FAILED=1
+    fi
 fi
 
 if [ "$FAILED" -ne 0 ]; then

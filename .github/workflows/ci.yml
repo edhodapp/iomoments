@@ -64,3 +64,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           find tooling -type f -name '*.sh' -print0 | xargs -0 -r shellcheck
+
+  c-gates:
+    name: C quality gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        # gcc + clang 18 + clang-tidy + clang-format + cppcheck + scan-build.
+        # scan-build is part of clang-tools-18 on Noble. BPF verifier load
+        # (bpftool) not installed here — kernel-in-a-box job lands later.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            clang-18 \
+            clang-tidy-18 \
+            clang-format-18 \
+            clang-tools-18 \
+            cppcheck
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
+          sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format
+          sudo ln -sf /usr/bin/scan-build-18 /usr/local/bin/scan-build
+
+      - name: fmt-check
+        run: make fmt-check
+
+      - name: lint-c (four engines)
+        run: make lint-c
+
+      - name: bpf-verify (stub)
+        # No BPF sources today; target exits 0. Real bpftool prog load
+        # lands in a separate kernel-in-a-box job once iomoments.bpf.c
+        # exists — GitHub runners' fixed kernels make an in-runner load
+        # fragile.
+        run: make bpf-verify
