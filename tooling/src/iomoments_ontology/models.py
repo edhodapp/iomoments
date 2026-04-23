@@ -12,18 +12,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from iomoments_ontology.types import (
     Cardinality,
     Description,
     ModuleStatus,
+    MomentSpace,
     PerfDirection,
     Priority,
     PropertyKind,
     RequirementStatus,
     SafeId,
     ShortName,
+    VerdictKind,
 )
 
 # --- Problem domain ------------------------------------------------------
@@ -195,6 +197,105 @@ class ModuleSpec(BaseModel):
     status: ModuleStatus = "not_started"
 
 
+# --- iomoments-specific types (Phase 4, D009) ---------------------------
+
+
+class DiagnosticSignal(BaseModel):
+    """A probe-phase validity indicator feeding the verdict layer.
+
+    Captures the diagnostic battery from D007: Carleman partial sum
+    for moment determinacy, Hankel matrix conditioning for atomic
+    decomposition, Hill tail-index estimator, KS goodness-of-fit
+    against a candidate space (log-normal), half-split moment
+    stability for per-moment noise floors. Each signal has a
+    measurement method and a set of verdict-entrance thresholds.
+
+    Semantically distinct from PerformanceConstraint: perf rows
+    compare measured values to budgets set in advance of any run;
+    diagnostic signals are recomputed per run AGAINST the current
+    sample and gate whether the moments derived from that sample
+    are emissible at all.
+
+    - ``method`` free-text for now (paper reference, formula sketch,
+      or algorithm name). Machine-parseable encoding can grow later
+      if the audit tool ever wants to cross-check derivations.
+    - ``thresholds`` maps a VerdictKind to a free-text entrance
+      expression (e.g., ``{"green": "alpha > 2.5", "red":
+      "alpha <= 1.0"}``). Strings, not structured predicates —
+      D021's draft-first rule applies; structure the thresholds once
+      Phase 6 audit actually needs to evaluate them.
+    - SysE traceability fields match DomainConstraint/PerformanceConstraint
+      so the audit tool treats all three uniformly.
+    """
+
+    name: str
+    description: str
+    method: str = ""
+    unit: str = ""
+    thresholds: dict[VerdictKind, str] = {}
+    rationale: str = ""
+    implementation_refs: list[str] = []
+    verification_refs: list[str] = []
+    status: RequirementStatus = "spec"
+
+
+class VerdictNode(BaseModel):
+    """A verdict category with its entrance criteria and output policy.
+
+    One VerdictNode per value of VerdictKind (green/yellow/amber/red).
+    The entrance_criteria list names DiagnosticSignal thresholds that
+    must hold for this verdict to fire; the output_policy describes
+    what iomoments does when it does.
+
+    Multiple entrance_criteria entries are combined with AND. OR
+    between signals is expressed by listing alternative criteria
+    strings; the audit tool (Phase 6) will eventually parse them.
+    Until then, the strings are documentation.
+
+    Per D007:
+      - green: Emit moments with expected error budget.
+      - yellow: Emit moments with caveats.
+      - amber: Emit moments with a diagnostic recommendation.
+      - red: REFUSE moment-based summary; recommend alternative.
+    """
+
+    kind: VerdictKind
+    description: str
+    entrance_criteria: list[str] = []
+    output_policy: str = ""
+    rationale: str = ""
+    implementation_refs: list[str] = []
+    verification_refs: list[str] = []
+    status: RequirementStatus = "spec"
+
+
+class MomentRepresentation(BaseModel):
+    """A specific (space, order) moment the system can emit.
+
+    D006 emits moments in both raw and log space for each of a small
+    set of orders (up through kurtosis at least, higher if the
+    diagnostic layer clears it). Enumerating the representations as
+    first-class entities gives the ontology something concrete to
+    attach DomainConstraints to (e.g., "the 4th log-space moment
+    requires diagnostic signal X to be in band Y").
+
+    - ``space``: raw or log (see MomentSpace).
+    - ``order``: k ≥ 1. Mean=1, variance=2, skewness=3, kurtosis=4.
+    - ``description``: what this representation is useful for.
+    - ``notes``: optional free-text; paper refs or cross-checks.
+
+    Lightweight by design — no SysE traceability fields because this
+    is a type description, not a requirement. Requirements ABOUT the
+    representation live in DomainConstraint entries that reference
+    the representation by name.
+    """
+
+    space: MomentSpace
+    order: int = Field(ge=1)
+    description: str = ""
+    notes: str = ""
+
+
 # --- Planning state ------------------------------------------------------
 
 
@@ -216,10 +317,44 @@ class Ontology(BaseModel):
     relationships: list[Relationship] = []
     domain_constraints: list[DomainConstraint] = []
     performance_constraints: list[PerformanceConstraint] = []
+    diagnostic_signals: list[DiagnosticSignal] = []
+    verdict_nodes: list[VerdictNode] = []
+    moment_representations: list[MomentRepresentation] = []
     modules: list[ModuleSpec] = []
     data_models: list[DataModel] = []
     external_dependencies: list[ExternalDependency] = []
     open_questions: list[OpenQuestion] = []
+
+    @model_validator(mode="after")
+    def _reject_duplicate_iomoments_rows(self) -> "Ontology":
+        """Enforce uniqueness where iomoments types have natural keys.
+
+        - MomentRepresentation: unique on (space, order). Two entries
+          with the same (space, order) are silently ambiguous when
+          DomainConstraint.description references "the log-3 moment."
+        - VerdictNode: at most one per VerdictKind. Contradictory
+          output_policy strings on two kind='red' nodes would make
+          the verdict semantics undefined.
+        """
+        seen_reps: set[tuple[str, int]] = set()
+        for rep in self.moment_representations:
+            key = (rep.space, rep.order)
+            if key in seen_reps:
+                raise ValueError(
+                    f"duplicate MomentRepresentation(space={rep.space}, "
+                    f"order={rep.order})"
+                )
+            seen_reps.add(key)
+
+        seen_kinds: set[str] = set()
+        for node in self.verdict_nodes:
+            if node.kind in seen_kinds:
+                raise ValueError(
+                    f"duplicate VerdictNode(kind={node.kind})"
+                )
+            seen_kinds.add(node.kind)
+
+        return self
 
 
 # --- DAG structure -------------------------------------------------------

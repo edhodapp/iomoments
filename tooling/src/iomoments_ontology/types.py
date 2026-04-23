@@ -97,3 +97,25 @@ RequirementStatus = Literal[
 #   equal  - measured value MUST equal budget exactly. Rare; used for
 #            protocol constants or fixed-point scale invariants.
 PerfDirection = Literal["max", "min", "equal"]
+
+# --- iomoments-specific literals (Phase 4, D009) -------------------------
+#
+# Verdict categories defined in D007 (core thesis). Each run produces
+# one verdict that gates whether the moment-based summary is emitted
+# and, if so, with what caveats.
+#   green   - moments are a trustworthy shape summary.
+#   yellow  - moments are informative but miss some structure
+#             (bimodality, etc.). Emitted with caveats.
+#   amber   - moments are likely biased (aliasing suspected).
+#             Emitted with a diagnostic recommendation.
+#   red     - moments are the wrong primitive (heavy tail with
+#             non-existent variance). Moment-based summary is REFUSED;
+#             iomoments recommends an alternative tool.
+VerdictKind = Literal["green", "yellow", "amber", "red"]
+
+# Space in which a moment is expressed. D006 emits both
+# representations; downstream consumers select.
+#   raw  - moments of the sample value directly.
+#   log  - moments of log(sample), converging faster on the
+#          log-normal-ish distributions typical of I/O latency.
+MomentSpace = Literal["raw", "log"]
