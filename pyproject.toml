@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 build-iomoments-ontology = "iomoments_ontology.build:main"
+audit-ontology = "audit_ontology.cli:main"
 
 [project.optional-dependencies]
 dev = [

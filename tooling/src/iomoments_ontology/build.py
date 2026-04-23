@@ -57,12 +57,16 @@ def _load_yaml_source(path: Path) -> dict[str, Any]:
     return data
 
 
-def _build_ontology(source_path: Path) -> Ontology:
+def build_ontology_from_yaml(source_path: Path) -> Ontology:
     """Load + validate the YAML source into an Ontology.
 
     Pydantic does all the work: literal checks, natural-key uniqueness
     on MomentRepresentation / VerdictNode, SysE field types, etc. A
     ValidationError here points at a schema mismatch in the YAML.
+
+    Public: the audit tool and other consumers can call this
+    directly when they need the Ontology object without the DAG
+    snapshot / git labels / lock-file ceremony of ``build()``.
     """
     raw = _load_yaml_source(source_path)
     return Ontology.model_validate(raw)
@@ -96,7 +100,7 @@ def build(
     the content hash matched the current DAG node and the append
     was elided.
     """
-    ontology = _build_ontology(source_path)
+    ontology = build_ontology_from_yaml(source_path)
     content_hash = ontology_content_hash(ontology)
     label = git_snapshot_label(prefix=label_prefix)
     decision = _build_decision(source_path, content_hash)

@@ -27,7 +27,7 @@ import yaml
 from pydantic import ValidationError
 
 from iomoments_ontology.build import (
-    _build_ontology,
+    build_ontology_from_yaml,
     _load_yaml_source,
     _parse_args,
     build,
@@ -70,7 +70,7 @@ def test_load_yaml_source_accepts_empty_file(tmp_path: Path) -> None:
     assert _load_yaml_source(src) == {}
 
 
-# --- _build_ontology -----------------------------------------------------
+# --- build_ontology_from_yaml -------------------------------------------
 
 
 def test_build_ontology_validates_schema(tmp_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_build_ontology_validates_schema(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValidationError):
-        _build_ontology(src)
+        build_ontology_from_yaml(src)
 
 
 def test_build_ontology_rejects_duplicate_moment_rep(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ def test_build_ontology_rejects_duplicate_moment_rep(tmp_path: Path) -> None:
     with pytest.raises(
         ValidationError, match="duplicate MomentRepresentation",
     ):
-        _build_ontology(src)
+        build_ontology_from_yaml(src)
 
 
 def test_build_ontology_round_trips_sample_yaml(tmp_path: Path) -> None:
@@ -122,7 +122,7 @@ def test_build_ontology_round_trips_sample_yaml(tmp_path: Path) -> None:
     }
     src = tmp_path / "sample.yaml"
     src.write_text(yaml.safe_dump(ont_src), encoding="utf-8")
-    ont = _build_ontology(src)
+    ont = build_ontology_from_yaml(src)
     assert isinstance(ont, Ontology)
     assert len(ont.entities) == 1 and ont.entities[0].id == "w"
     assert ont.domain_constraints[0].status == "spec"
@@ -184,7 +184,7 @@ def test_build_appends_on_content_change(tmp_path: Path) -> None:
 
 def test_shipped_yaml_loads_cleanly() -> None:
     """The shipped tooling/iomoments-ontology.yaml validates."""
-    ont = _build_ontology(_SHIPPED_YAML)
+    ont = build_ontology_from_yaml(_SHIPPED_YAML)
     assert isinstance(ont, Ontology)
     # Sanity-check the draft content matches our Phase 5 scope.
     assert len(ont.verdict_nodes) == 4
@@ -202,7 +202,7 @@ def test_shipped_json_matches_shipped_yaml() -> None:
     """
     if not _SHIPPED_JSON.exists():
         pytest.skip("shipped DAG not yet built")
-    ont_from_yaml = _build_ontology(_SHIPPED_YAML)
+    ont_from_yaml = build_ontology_from_yaml(_SHIPPED_YAML)
     dag = load_dag(str(_SHIPPED_JSON), project_name="iomoments")
     current = dag.get_current_node()
     assert current is not None
@@ -238,7 +238,7 @@ def test_content_hash_is_whitespace_sensitive(tmp_path: Path) -> None:
             ),
             encoding="utf-8",
         )
-        return ontology_content_hash(_build_ontology(src))
+        return ontology_content_hash(build_ontology_from_yaml(src))
 
     assert _build("hello world") != _build("hello  world")
     assert _build("hello world") != _build("hello world ")
