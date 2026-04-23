@@ -1,0 +1,23 @@
+# Local Claude Code settings (permissions, per-project overrides)
+.claude/settings.local.json
+
+# Python build / test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.coverage
+*.egg-info/
+
+# C / BPF build artifacts
+*.o
+*.bpf.o
+compile_commands.json
+
+# Generated kernel type introspection (rebuilt via `bpftool btf dump`)
+src/vmlinux.h
+
+# Editor scratch
+*.swp
+.DS_Store

@@ -1,0 +1,60 @@
+iomoments
+Copyright (C) 2026 Ed Hodapp <ed@hodapp.com>
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+iomoments is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+iomoments is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero
+General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full license text is in `LICENSE`.
+
+Note on the BPF program source file (`src/iomoments.bpf.c`): that single
+translation unit is dual-licensed `(GPL-2.0-only OR AGPL-3.0-or-later)`
+via SPDX header, and declares `char _license[] SEC("license") = "GPL";`
+in-source. This is a kernel-ABI requirement — Linux's
+`license_is_gpl_compatible()` allowlist (`kernel/bpf/core.c`) does not
+recognize the literal string "AGPL", even though AGPL-3.0 is legally
+GPL-compatible via AGPL §13, and most tracing helpers iomoments needs
+are GPL-only. The GPL-2.0-only branch unlocks those helpers at verifier
+time; the AGPL-3.0-or-later branch keeps the project's overall license
+identity consistent. See `DECISIONS.md` D001 for the full rationale.
+
+
+No external contributions accepted
+----------------------------------
+
+Ed Hodapp is the sole author and sole copyright holder of iomoments.
+External contributions (pull requests, patches, and similar upstream
+submissions) are **not accepted** at this time. Bug reports via GitHub
+issues are welcome; fixes described in issues may be reimplemented by
+the author. This follows the SQLite model and matches the sibling
+open-source projects.
+
+Consolidated copyright ownership preserves future licensing flexibility.
+In particular, Ed retains the right to issue private commercial grants
+that permit the iomoments algorithms to be re-implemented inside
+proprietary sibling projects (e.g., bare-metal ARM64 assembly codebases
+where AGPL contamination is incompatible with product licensing), under
+terms negotiated case-by-case. Accepting external contributions under
+AGPL without a CLA would lock that option down.
+
+The Pébay (2008) update rules and the underlying method of moments are
+public prior art (Sandia SAND2008-6212; Pearson 1894). AGPL protects
+specific code expression only, not algorithms. Re-implementations
+written from the Pébay paper rather than translated from the iomoments
+C source are not encumbered by this project's license.
+
+Commercial deployments that cannot accept AGPL's network-copyleft (§13)
+obligations — SaaS operators, OEM integrators, and anyone embedding
+iomoments in a closed-source observability product — should contact Ed
+for a commercial license / consulting engagement.
