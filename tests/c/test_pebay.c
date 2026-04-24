@@ -2,12 +2,14 @@
 /* Copyright (C) 2026 Ed Hodapp <ed@hodapp.com> */
 
 /*
- * Behavioral tests for src/pebay.h at k=2 (Welford).
+ * Behavioral tests for src/pebay.h at k=4.
  *
- * Fixtures are hand-computed — the whole point of testing the k=2 case
- * first is that a reader can verify the expected values against the
- * textbook without running anything. Extended with ULP-tolerance merge
- * property checks.
+ * Fixtures are hand-computed — the whole point of testing this way is
+ * that a reader can verify the expected values against the textbook
+ * without running anything. Mean + variance fixtures are from
+ * Wikipedia's "Standard deviation" article; skewness + kurtosis
+ * fixtures are computed by hand and cross-checked against scipy
+ * (`scipy.stats.moment` + `.skew` + `.kurtosis`).
  *
  * Exit code: 0 = all tests passed; 1 = at least one failed.
  */
@@ -179,23 +181,144 @@ static void test_self_merge_is_aliasing_safe(void)
 }
 
 /*
- * Fixture 6: variance getter returns 0 on an empty summary (documented
- * stable contract). Also exercises iomoments_summary_init as the
- * runtime-init counterpart to IOMOMENTS_SUMMARY_ZERO — the two paths
- * must leave the summary in the same state.
+ * Fixture 6: getters return 0 on an empty summary (documented stable
+ * contract). Also exercises iomoments_summary_init as the runtime-init
+ * counterpart to IOMOMENTS_SUMMARY_ZERO — the two paths must leave the
+ * summary in the same state across all four moments.
  */
 static void test_empty_summary_readouts(void)
 {
 	struct iomoments_summary s = IOMOMENTS_SUMMARY_ZERO;
 	CHECK(s.n == 0);
-	CHECK(iomoments_summary_variance(&s) == 0.0);
 	CHECK(iomoments_summary_mean(&s) == 0.0);
+	CHECK(iomoments_summary_variance(&s) == 0.0);
+	CHECK(iomoments_summary_skewness(&s) == 0.0);
+	CHECK(iomoments_summary_excess_kurtosis(&s) == 0.0);
 
 	struct iomoments_summary s2;
 	iomoments_summary_init(&s2);
 	CHECK(s2.n == s.n);
 	CHECK(s2.m1 == s.m1);
 	CHECK(s2.m2 == s.m2);
+	CHECK(s2.m3 == s.m3);
+	CHECK(s2.m4 == s.m4);
+}
+
+/*
+ * Fixture 7: hand-computed k=4 fixture on [1, 1, 1, 1, 2].
+ *
+ * Pick: small asymmetric sample with a non-trivial skew and a
+ * non-Gaussian kurtosis, verifiable with grade-school arithmetic.
+ *
+ *   n        = 5
+ *   mean     = (1+1+1+1+2)/5 = 6/5 = 1.2
+ *   deviations d = [-0.2, -0.2, -0.2, -0.2, 0.8]
+ *   M2       = 4·(0.04) + 0.64 = 0.16 + 0.64 = 0.80
+ *   variance = M2/n = 0.80/5 = 0.16
+ *   M3       = 4·(-0.008) + 0.512 = -0.032 + 0.512 = 0.48
+ *   skewness = √n · M3 / M2^(3/2)
+ *            = √5 · 0.48 / 0.80^1.5
+ *            = 2.2360679... · 0.48 / 0.7155417528...
+ *            = 1.5 exactly
+ *   M4       = 4·(0.0016) + 0.4096 = 0.0064 + 0.4096 = 0.416
+ *   excess κ = n · M4 / M2² - 3
+ *            = 5 · 0.416 / 0.64 - 3
+ *            = 3.25 - 3 = 0.25
+ *
+ * Cross-checked against scipy: scipy.stats.skew([1,1,1,1,2]) = 1.5;
+ * scipy.stats.kurtosis([1,1,1,1,2]) = 0.25 (default fisher=True, i.e.
+ * excess kurtosis).
+ */
+static void test_small_asymmetric_k4_fixture(void)
+{
+	const double xs[] = {1.0, 1.0, 1.0, 1.0, 2.0};
+	const size_t n = sizeof(xs) / sizeof(xs[0]);
+	struct iomoments_summary s = IOMOMENTS_SUMMARY_ZERO;
+	for (size_t i = 0; i < n; i++) {
+		iomoments_summary_update(&s, xs[i]);
+	}
+	CHECK(s.n == n);
+	CHECK(approx_equal(iomoments_summary_mean(&s), 1.2, 1e-14));
+	CHECK(approx_equal(iomoments_summary_variance(&s), 0.16, 1e-14));
+	CHECK(approx_equal(iomoments_summary_skewness(&s), 1.5, 1e-14));
+	CHECK(approx_equal(iomoments_summary_excess_kurtosis(&s), 0.25, 1e-14));
+}
+
+/*
+ * Fixture 8: symmetric sample [1, 2, 3, 4, 5]. Skewness is exactly
+ * zero by symmetry; excess kurtosis is -1.3 (a platykurtic, flatter-
+ * than-Gaussian tail — reasonable for a finite uniform-ish sample).
+ *
+ *   mean     = 3
+ *   d        = [-2, -1, 0, 1, 2]
+ *   M2       = 4 + 1 + 0 + 1 + 4 = 10
+ *   variance = 10/5 = 2
+ *   M3       = -8 + -1 + 0 + 1 + 8 = 0
+ *   skewness = 0 (by symmetry)
+ *   M4       = 16 + 1 + 0 + 1 + 16 = 34
+ *   excess κ = 5·34/100 - 3 = 1.7 - 3 = -1.3
+ *
+ * Cross-checked against scipy: scipy.stats.skew([1,2,3,4,5]) = 0.0;
+ * scipy.stats.kurtosis([1,2,3,4,5]) = -1.3.
+ */
+static void test_uniform_symmetric_fixture(void)
+{
+	const double xs[] = {1.0, 2.0, 3.0, 4.0, 5.0};
+	const size_t n = sizeof(xs) / sizeof(xs[0]);
+	struct iomoments_summary s = IOMOMENTS_SUMMARY_ZERO;
+	for (size_t i = 0; i < n; i++) {
+		iomoments_summary_update(&s, xs[i]);
+	}
+	CHECK(s.n == n);
+	CHECK(approx_equal(iomoments_summary_mean(&s), 3.0, 1e-15));
+	CHECK(approx_equal(iomoments_summary_variance(&s), 2.0, 1e-15));
+	CHECK(approx_equal(iomoments_summary_skewness(&s), 0.0, 1e-14));
+	CHECK(approx_equal(iomoments_summary_excess_kurtosis(&s), -1.3, 1e-14));
+}
+
+/*
+ * Fixture 9: k=4 parallel-combine round-trip. If merge(a, b) at k=4
+ * doesn't match a single stream of the same samples for M3 and M4,
+ * userspace can't reduce the per-CPU BPF maps into a single aggregate
+ * skewness/kurtosis without corrupting the answer.
+ *
+ * Samples chosen so both halves have different means (otherwise the δ
+ * correction terms vanish and the merge reduces to sum-of-Mₖ, which
+ * doesn't exercise the non-trivial path).
+ */
+static void test_k4_merge_matches_single_stream(void)
+{
+	const double xs[] = {
+		1.0, 1.0, 1.0, 1.0, /* stream_a: mean 1.0 */
+		2.0, 3.0, 5.0, 8.0  /* stream_b: mean 4.5 */
+	};
+	const size_t split = 4;
+	const size_t n = sizeof(xs) / sizeof(xs[0]);
+
+	struct iomoments_summary full = IOMOMENTS_SUMMARY_ZERO;
+	for (size_t i = 0; i < n; i++) {
+		iomoments_summary_update(&full, xs[i]);
+	}
+
+	struct iomoments_summary a = IOMOMENTS_SUMMARY_ZERO;
+	struct iomoments_summary b = IOMOMENTS_SUMMARY_ZERO;
+	for (size_t i = 0; i < split; i++) {
+		iomoments_summary_update(&a, xs[i]);
+	}
+	for (size_t i = split; i < n; i++) {
+		iomoments_summary_update(&b, xs[i]);
+	}
+	iomoments_summary_merge(&a, &b);
+
+	CHECK(a.n == full.n);
+	CHECK(approx_equal(iomoments_summary_mean(&a),
+			   iomoments_summary_mean(&full), 1e-13));
+	CHECK(approx_equal(iomoments_summary_variance(&a),
+			   iomoments_summary_variance(&full), 1e-13));
+	CHECK(approx_equal(iomoments_summary_skewness(&a),
+			   iomoments_summary_skewness(&full), 1e-12));
+	CHECK(approx_equal(iomoments_summary_excess_kurtosis(&a),
+			   iomoments_summary_excess_kurtosis(&full), 1e-12));
 }
 
 int main(void)
@@ -206,11 +329,14 @@ int main(void)
 	test_merge_with_empty();
 	test_self_merge_is_aliasing_safe();
 	test_empty_summary_readouts();
+	test_small_asymmetric_k4_fixture();
+	test_uniform_symmetric_fixture();
+	test_k4_merge_matches_single_stream();
 
 	if (failures > 0) {
 		fprintf(stderr, "\n%d assertion(s) failed.\n", failures);
 		return 1;
 	}
-	printf("All Pébay k=2 tests passed.\n");
+	printf("All Pébay k=4 tests passed.\n");
 	return 0;
 }

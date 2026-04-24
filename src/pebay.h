@@ -2,27 +2,24 @@
 /* Copyright (C) 2026 Ed Hodapp <ed@hodapp.com> */
 
 /*
- * Pébay (2008) online moment update — k=2 partial implementation.
+ * Pébay (2008) online moment update at k=4.
  *
  * Reference: Philippe Pébay, "Formulas for Robust, One-Pass Parallel
  * Computation of Covariances and Arbitrary-Order Statistical Moments,"
  * Sandia National Laboratories SAND2008-6212, 2008.
  *
- * This file is header-only on purpose (D005): the same functions are
- * inlined into the BPF kernel-side program (`src/iomoments.bpf.c`,
- * pending) and the userspace aggregator (`src/iomoments.c`, pending),
- * so there's no call-boundary overhead on the hot path.
+ * Userspace canonical (double-precision) companion to src/pebay_bpf.h.
+ * Tracks M1 (running mean), M2 (sum of squared deviations), M3 and M4
+ * (sum of cubed and fourth-power deviations) via Pébay's
+ * numerically-stable update + parallel-combine rules. Readouts:
  *
- * **Current scope — Welford (k=2 case) only.** Pébay's update at
- * arbitrary order generalizes Welford (1962) for mean + variance with
- * a parallel-combine rule that merges two partial summaries into the
- * summary of their union. This file implements k=2 — mean and variance
- * plus merge — because that's the textbook-verifiable subset. Higher
- * moments (M3, M4) land in a follow-up commit once this foundation is
- * gate-proven.
+ *   mean     = M1
+ *   variance = M2 / n
+ *   skewness = sqrt(n) · M3 / M2^(3/2)
+ *   kurtosis = n · M4 / M2² - 3    (excess kurtosis; 0 for Gaussian)
  *
  * Numerical stability rationale (D006):
- * - Sum-of-powers accumulation (tracking Σxⁱ directly) is rejected —
+ * - Sum-of-powers accumulation (tracking Σxᵏ directly) is rejected —
  *   catastrophic cancellation makes higher-order sample moments
  *   unusable on realistic I/O streams. Pébay's central-moment form
  *   avoids this.
@@ -34,54 +31,43 @@
 #ifndef IOMOMENTS_PEBAY_H
 #define IOMOMENTS_PEBAY_H
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
 /*
  * IOMOMENTS_INLINE controls whether the update/merge functions end up
- * as real call boundaries or inlined at every use site. Under clang's
- * BPF target the verifier rejects function calls into helpers not
- * marked always_inline, so we force it there; in userspace -O2 the
- * static inline hint is enough for gcc/clang to inline the tiny
- * bodies without pinning it.
+ * as real call boundaries or inlined at every use site.
  */
 #ifndef IOMOMENTS_INLINE
-#if defined(__bpf__)
-#define IOMOMENTS_INLINE static inline __attribute__((always_inline))
-#else
 #define IOMOMENTS_INLINE static inline
-#endif
 #endif
 
 /*
  * Running moment summary for a single stream of samples.
  *
  * Field naming follows Pébay 2008 notation:
- *   n   - count of samples processed so far.
- *   m1  - running mean.
- *   m2  - running sum of squared deviations from the mean
- *         (NOT variance — variance is m2 / n, and that division is
- *         deferred until read-out so the summary is mergeable by
- *         Pébay's parallel-combine rule without losing precision).
+ *   n      - count of samples processed so far.
+ *   m1     - running mean.
+ *   m2..m4 - running sums of (x - m1)^k for k = 2, 3, 4. Variance,
+ *            skewness, and excess kurtosis are derived from these +
+ *            n at read-out time.
  *
- * Fits comfortably in one cache line (24 bytes with 8-byte alignment)
- * per the D009 per_cpu_update_bytes performance constraint (budget:
- * 64 bytes). Stays under budget at k=2; M3/M4 will push it higher.
+ * 40 bytes with 8-byte alignment. This is the userspace-only shape
+ * (per D011, the BPF kernel-side path uses pebay_bpf.h with its own
+ * fixed-point storage layout).
  */
 struct iomoments_summary {
 	uint64_t n;
 	double m1;
 	double m2;
+	double m3;
+	double m4;
 };
 
-/*
- * Zero-initialize a summary. Usable as a static initializer
- * (`struct iomoments_summary s = IOMOMENTS_SUMMARY_ZERO;`) or via the
- * helper below for runtime paths.
- */
 #define IOMOMENTS_SUMMARY_ZERO                                                 \
 	{                                                                      \
-		0, 0.0, 0.0                                                    \
+		0, 0.0, 0.0, 0.0, 0.0                                          \
 	}
 
 IOMOMENTS_INLINE void iomoments_summary_init(struct iomoments_summary *s)
@@ -89,61 +75,68 @@ IOMOMENTS_INLINE void iomoments_summary_init(struct iomoments_summary *s)
 	s->n = 0;
 	s->m1 = 0.0;
 	s->m2 = 0.0;
+	s->m3 = 0.0;
+	s->m4 = 0.0;
 }
 
 /*
- * Incorporate a single new sample x into the running summary s.
+ * Incorporate one sample x into the running summary.
  *
- * Algorithm: Welford (1962) — equivalent to Pébay 2008 eq. (2.1),
- * (2.2) at k=2. One branch-free update per sample; intermediate
- * quantities stay bounded by the sample spread.
+ * Algorithm: Pébay 2008 eq. (2.1) at k=4. Updated field order is
+ * load-bearing — M4 uses the OLD M2 and M3, then M3 uses the OLD M2,
+ * then M2 updates last. Do NOT reorder without recomputing the
+ * algebraic equivalence.
  *
- *   n'      = n + 1
- *   δ       = x - m1
- *   δ/n'    — running-mean adjustment
- *   m1     += δ/n'
- *   m2     += δ · (x - m1_new)      [i.e. δ · (δ - δ/n') = δ²(n/n')]
- *
- * The second form of the m2 update uses the NEW m1 (after the
- * increment). That's what makes it stable: (x - m1_new) is the
- * residual against the updated mean, not the pre-update one.
- */
-/*
- * Caller is responsible for preventing uint64_t overflow of `n`. At
- * 2^64 samples that's ~584 years of 1-ns-per-sample updates; not a
- * realistic concern for iomoments' workload sizes, so the cost of a
- * saturation check every update is refused here.
+ *   n_old    = n
+ *   n       += 1
+ *   δ        = x - m1                      (pre-update residual)
+ *   δ/n      — mean adjustment
+ *   δ/n²     = (δ/n)² — convenience
+ *   term1    = δ · (δ/n) · n_old           = δ² · n_old / n
+ *   m1      += δ/n
+ *   m4      += term1 · (δ/n)² · (n² - 3n + 3)
+ *              + 6 (δ/n)² m2 - 4 (δ/n) m3
+ *   m3      += term1 · (δ/n) · (n - 2) - 3 (δ/n) m2
+ *   m2      += term1
  */
 IOMOMENTS_INLINE void iomoments_summary_update(struct iomoments_summary *s,
 					       double x)
 {
+	uint64_t n_old = s->n;
 	s->n += 1;
+	double nf = (double)s->n;
 	double delta = x - s->m1;
-	s->m1 += delta / (double)s->n;
-	double delta_post = x - s->m1;
-	s->m2 += delta * delta_post;
+	double delta_n = delta / nf;
+	double delta_n2 = delta_n * delta_n;
+	double term1 = delta * delta_n * (double)n_old;
+	s->m1 += delta_n;
+	s->m4 += term1 * delta_n2 * (nf * nf - 3.0 * nf + 3.0) +
+		 6.0 * delta_n2 * s->m2 - 4.0 * delta_n * s->m3;
+	s->m3 += term1 * delta_n * (nf - 2.0) - 3.0 * delta_n * s->m2;
+	s->m2 += term1;
 }
 
 /*
  * Merge partial summary `b` into `a` in place.
  *
- * Algorithm: Pébay 2008 eq. (3.2), (3.3) at k=2. This is the rule
- * that makes per-CPU accumulation work — each CPU runs its own
- * summary; userspace merges them to a single aggregate without
- * re-scanning the raw samples.
+ * Algorithm: Pébay 2008 eq. (3.2)-(3.5) at k=4. Parallel-combine rule
+ * that lets per-CPU accumulators be reduced to a single aggregate
+ * without replaying raw samples.
  *
  *   n       = n_a + n_b
  *   δ       = m1_b - m1_a
- *   m1_new  = (n_a · m1_a + n_b · m1_b) / n
- *   m2_new  = m2_a + m2_b + δ² · n_a · n_b / n
+ *   m1      = (n_a · m1_a + n_b · m1_b) / n
+ *   m2      = m2_a + m2_b + δ² · n_a · n_b / n
+ *   m3      = m3_a + m3_b
+ *           + δ³ · n_a · n_b · (n_a - n_b) / n²
+ *           + 3 δ · (n_a · m2_b - n_b · m2_a) / n
+ *   m4      = m4_a + m4_b
+ *           + δ⁴ · n_a · n_b · (n_a² - n_a·n_b + n_b²) / n³
+ *           + 6 δ² · (n_a² · m2_b + n_b² · m2_a) / n²
+ *           + 4 δ · (n_a · m3_b - n_b · m3_a) / n
  *
- * The δ² · n_a · n_b / n term is the "correction" for the variance
- * estimate needing to account for the gap between the two
- * sub-streams' means. Goes to zero when m1_a = m1_b, as expected.
- *
- * Merging into an empty `a` (n_a = 0) is the identity on `b`. We
- * handle that explicitly to skip the division that would otherwise
- * compute 0/0.
+ * Aliasing-safe: `b` is snapshotted before any write to `a`, so
+ * iomoments_summary_merge(&s, &s) is a well-defined self-merge.
  */
 IOMOMENTS_INLINE void iomoments_summary_merge(struct iomoments_summary *a,
 					      const struct iomoments_summary *b)
@@ -155,32 +148,43 @@ IOMOMENTS_INLINE void iomoments_summary_merge(struct iomoments_summary *a,
 		*a = *b;
 		return;
 	}
-	/*
-	 * Snapshot `b` first so the function is aliasing-safe: if a
-	 * caller writes iomoments_summary_merge(&s, &s) (semantically
-	 * well-defined: observing a stream twice doubles n and m2,
-	 * keeps m1), the writes to `a` below would otherwise clobber
-	 * the fields we still need to read out of `b`. The optimizer
-	 * elides the snapshot when the compiler can prove a != b.
-	 */
 	struct iomoments_summary b_snap = *b;
 	uint64_t n = a->n + b_snap.n;
+	double nf = (double)n;
+	double n_a = (double)a->n;
+	double n_b = (double)b_snap.n;
 	double delta = b_snap.m1 - a->m1;
-	double m1_new = (double)a->n / (double)n * a->m1 +
-			(double)b_snap.n / (double)n * b_snap.m1;
-	double correction =
-		delta * delta * (double)a->n * (double)b_snap.n / (double)n;
+	double delta2 = delta * delta;
+	double delta3 = delta2 * delta;
+	double delta4 = delta3 * delta;
+
+	double m1_new = n_a / nf * a->m1 + n_b / nf * b_snap.m1;
+
+	double m2_correction = delta2 * n_a * n_b / nf;
+	double m2_new = a->m2 + b_snap.m2 + m2_correction;
+
+	double m3_correction =
+		delta3 * n_a * n_b * (n_a - n_b) / (nf * nf) +
+		3.0 * delta * (n_a * b_snap.m2 - n_b * a->m2) / nf;
+	double m3_new = a->m3 + b_snap.m3 + m3_correction;
+
+	double m4_correction =
+		delta4 * n_a * n_b * (n_a * n_a - n_a * n_b + n_b * n_b) /
+			(nf * nf * nf) +
+		6.0 * delta2 * (n_a * n_a * b_snap.m2 + n_b * n_b * a->m2) /
+			(nf * nf) +
+		4.0 * delta * (n_a * b_snap.m3 - n_b * a->m3) / nf;
+	double m4_new = a->m4 + b_snap.m4 + m4_correction;
+
 	a->n = n;
 	a->m1 = m1_new;
-	a->m2 = a->m2 + b_snap.m2 + correction;
+	a->m2 = m2_new;
+	a->m3 = m3_new;
+	a->m4 = m4_new;
 }
 
-/*
- * Return the mean. Stable contract: a zero-initialized summary returns
- * 0.0 (the m1 field is zero-initialized and no updates have occurred).
- * Callers that need to distinguish "no samples yet" from "mean is 0"
- * must check n == 0 explicitly before interpreting the value.
- */
+/* --- Readouts --------------------------------------------------------- */
+
 IOMOMENTS_INLINE double
 iomoments_summary_mean(const struct iomoments_summary *s)
 {
@@ -188,14 +192,7 @@ iomoments_summary_mean(const struct iomoments_summary *s)
 }
 
 /*
- * Return the population variance (σ² = m2 / n). Undefined (returns
- * 0.0) when n == 0.
- *
- * Population vs sample variance: this function returns the population
- * form because iomoments summarizes the observed workload, not
- * inferences about a larger population from a sample. If a downstream
- * consumer needs the sample variance (unbiased estimator, n-1
- * divisor), they can recompute it from m2 and n directly.
+ * Population variance (σ² = m2 / n). Zero on empty summary.
  */
 IOMOMENTS_INLINE double
 iomoments_summary_variance(const struct iomoments_summary *s)
@@ -204,6 +201,46 @@ iomoments_summary_variance(const struct iomoments_summary *s)
 		return 0.0;
 	}
 	return s->m2 / (double)s->n;
+}
+
+/*
+ * Population skewness γ₁ = E[(X-μ)³] / σ³
+ *                       = (M3/n) / (M2/n)^(3/2)
+ *                       = √n · M3 / M2^(3/2)
+ *
+ * Returns 0.0 on empty summary or when M2 is near-zero (constant
+ * stream — skewness undefined). Caller should check n > some
+ * threshold and M2 > some threshold for meaningful interpretation;
+ * iomoments' diagnostic layer (D007) surfaces the "too few samples /
+ * distribution too narrow" cases as separate signals.
+ */
+IOMOMENTS_INLINE double
+iomoments_summary_skewness(const struct iomoments_summary *s)
+{
+	if (s->n == 0 || s->m2 <= 0.0) {
+		return 0.0;
+	}
+	/* √n · M3 / M2^(3/2) */
+	double nf = (double)s->n;
+	double m2_pow_1_5 = s->m2 * sqrt(s->m2);
+	return sqrt(nf) * s->m3 / m2_pow_1_5;
+}
+
+/*
+ * Population excess kurtosis γ₂ = E[(X-μ)⁴] / σ⁴ - 3
+ *                              = n · M4 / M2² - 3
+ *
+ * Zero for Gaussian. Positive for heavy-tailed / peaked
+ * distributions. Returns 0.0 on empty summary or near-zero M2.
+ */
+IOMOMENTS_INLINE double
+iomoments_summary_excess_kurtosis(const struct iomoments_summary *s)
+{
+	if (s->n == 0 || s->m2 <= 0.0) {
+		return 0.0;
+	}
+	double nf = (double)s->n;
+	return nf * s->m4 / (s->m2 * s->m2) - 3.0;
 }
 
 #endif /* IOMOMENTS_PEBAY_H */
