@@ -19,13 +19,20 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BPF_SOURCES = list(
-    (_REPO_ROOT / "src").glob("*.bpf.c"),
-)
+# rglob so BPF sources organized into subdirs under src/ (e.g.,
+# src/probes/foo.bpf.c) are still picked up.
+_BPF_SOURCES = list((_REPO_ROOT / "src").rglob("*.bpf.c"))
 
 
 def test_bpf_verify_passes() -> None:
-    """make bpf-verify returns 0 — BPF compiles, BTF dumps cleanly."""
+    """make bpf-verify returns 0 — BPF compiles and BTF dumps cleanly.
+
+    bpf-verify's dependency graph runs bpf-compile first via make's
+    own pattern-rule machinery, so this one invocation exercises both
+    the compile and the static BTF inspection paths. A separate
+    bpf-compile test would be redundant (make caches object timestamps
+    and the second invocation would be a no-op).
+    """
     if not _BPF_SOURCES:
         pytest.skip("no BPF sources to verify")
     result = subprocess.run(
@@ -47,16 +54,30 @@ def test_bpf_verify_passes() -> None:
 
 
 def test_bpf_objects_exist_after_compile() -> None:
-    """Every src/*.bpf.c produces a build/*.bpf.o of nonzero size."""
+    """Every src/*.bpf.c produces a build/*.bpf.o of nonzero size.
+
+    Separate from bpf-verify because the artifact-existence check is
+    a distinct invariant from BTF correctness: a hypothetical future
+    Makefile change that skips the compile would pass bpf-verify (no
+    objects to check) while failing this test.
+    """
     if not _BPF_SOURCES:
         pytest.skip("no BPF sources")
-    subprocess.run(
+    result = subprocess.run(
         ["make", "bpf-compile"],
         cwd=_REPO_ROOT,
-        check=True,
+        capture_output=True,
+        text=True,
+        check=False,
         timeout=300,
     )
+    assert result.returncode == 0, (
+        f"bpf-compile failed (rc={result.returncode}):\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
     for src in _BPF_SOURCES:
+        # Makefile pattern: src/%.bpf.c -> build/%.bpf.o.
         obj = _REPO_ROOT / "build" / f"{src.stem}.o"
         assert obj.is_file(), f"missing BPF object: {obj}"
         assert obj.stat().st_size > 0, f"empty BPF object: {obj}"

@@ -34,15 +34,17 @@
 #include <bpf/bpf_helpers.h>
 
 /*
- * The variable name `_license` is a libbpf convention: the kernel's
- * BPF loader finds this by exact name in the "license" ELF section
- * to check license_is_gpl_compatible() before granting access to
- * GPL-only helpers. Can't rename. Reserved-identifier warning would
- * only be relevant if the name were free to change.
+ * The kernel's BPF loader identifies the program's license by reading
+ * the contents of the ELF `license` section (placed here via the SEC
+ * macro), not by the C variable's name. The name `_license` is a
+ * libbpf-ecosystem convention — every BPF program in the tree uses
+ * it, and libbpf's own generated skeletons assume it — so we keep it
+ * for consistency rather than because the C identifier itself has a
+ * kernel-ABI meaning. Reserved-identifier warning fires on the
+ * leading-underscore form regardless; suppressed inline.
  */
 /* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
-char _license[] SEC("license")
-= "GPL";
+char _license[] SEC("license") = "GPL";
 
 /*
  * The BPF loader finds this function by its ELF section

@@ -68,10 +68,12 @@ PenaltyBreakBeforeFirstCallParameter: 30
 PenaltyBreakString:              10
 PenaltyExcessCharacter:          100
 
-# Tell clang-format what a function-like macro is so SEC("kprobe/...")
-# and similar libbpf idioms aren't reformatted as function calls.
+# Function-like macros that clang-format should treat as regular macro
+# invocations (NOT as statements). SEC is excluded on purpose: treating
+# it as a StatementMacro forces `char _license[] SEC("license") = "GPL";`
+# to wrap weirdly with `= "GPL"` on its own line. As a regular macro,
+# clang-format leaves it alone and the single-line form survives.
 StatementMacros:
-  - SEC
   - __always_inline
 
 # No trailing commas enforced; kernel style tolerates both.
