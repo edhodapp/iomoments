@@ -352,6 +352,24 @@ domain_constraints:
       draft-first; see OpenQuestion bpf_fixedpoint_scale_choice.
     status: spec
 
+  - name: bpf_programs_tested_in_vm_not_host
+    description: >
+      BPF programs are loaded, verifier-checked, and functionally
+      tested inside a VM with a separate kernel instance from the
+      developer's laptop. The host kernel is NEVER the target of
+      `bpftool prog load` during development or CI. Orchestration
+      via vmtest; `make bpf-verify` (pre-push) and `make bpf-test-vm`
+      (functional) both go through the VM once BPF sources exist.
+    rationale: >
+      D012 — containers share the host kernel, so a BPF program
+      that passes the verifier but hangs a hot tracepoint or
+      exploits a verifier bug can still crash the laptop. Only a
+      VM provides real crash isolation.
+    implementation_refs:
+      - "Makefile:bpf-test-vm"
+      - "Makefile:bpf-verify"
+    status: spec
+
 # --- Performance constraints --------------------------------------------
 #
 # All budgets are spec-level targets today — no measured values exist

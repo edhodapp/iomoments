@@ -65,9 +65,19 @@ CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 
 .PHONY: help venv install-hooks test test-c \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
-        lint-c-scanbuild fmt-check bpf-verify \
+        lint-c-scanbuild fmt-check bpf-verify bpf-test-vm \
         build-ontology gate-ontology \
         clean gate-local distclean
+
+# vmtest (D012) reads the guest kernel from here. Distros ship
+# /boot/vmlinuz-* mode 0600, so the developer copies it to a
+# user-readable location once:
+#
+#   sudo cp /boot/vmlinuz-$(uname -r) ~/kernel-images/vmlinuz-host
+#   sudo chown $(id -un) ~/kernel-images/vmlinuz-host
+#
+# Override per-invocation with `make bpf-test-vm KERNEL_IMAGE=...`.
+KERNEL_IMAGE    ?= $(HOME)/kernel-images/vmlinuz-host
 
 help:
 	@echo "iomoments make targets:"
@@ -80,6 +90,7 @@ help:
 	@echo "  lint-c         Four-engine C static analysis per D008."
 	@echo "  fmt-check      clang-format --dry-run --Werror on all C files."
 	@echo "  bpf-verify     bpftool prog load on .bpf.o (stub until first .bpf.c)."
+	@echo "  bpf-test-vm    Load + run BPF in a VM via vmtest (D012; stub today)."
 	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
 	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
 	@echo "  gate-local     Full pre-push check: shellcheck + pytest + lints + ontology."
@@ -237,7 +248,33 @@ bpf-verify:
 		echo "(no BPF sources; bpf-verify is a no-op today.)"; \
 	else \
 		echo "ERROR: BPF sources present but bpf-verify is not yet implemented." >&2; \
-		echo "  Wire: clang -target bpf -> iomoments.bpf.o -> bpftool prog load." >&2; \
+		echo "  Wire: clang -target bpf -> iomoments.bpf.o -> vmtest -> bpftool prog load inside VM." >&2; \
+		exit 1; \
+	fi
+
+# ---------------------------------------------------------------------------
+# VM-side BPF tests (D012). Runs the BPF program inside a vmtest guest so a
+# verifier slip, a hung tracepoint, or a verifier-bug exploit can't affect
+# the host kernel. Stubbed until src/iomoments.bpf.c exists; when it does,
+# the fail-clearly branch runs vmtest pointing at $(KERNEL_IMAGE).
+# ---------------------------------------------------------------------------
+bpf-test-vm:
+	@if [ -z "$(BPF_SOURCES)" ]; then \
+		echo "(no BPF sources; bpf-test-vm is a no-op today.)"; \
+	elif [ ! -f "$(KERNEL_IMAGE)" ]; then \
+		echo "ERROR: kernel image not found at $(KERNEL_IMAGE)." >&2; \
+		echo "  Copy your host kernel once:" >&2; \
+		echo "    sudo cp /boot/vmlinuz-\$$(uname -r) $(KERNEL_IMAGE)" >&2; \
+		echo "    sudo chown \$$(id -un) $(KERNEL_IMAGE)" >&2; \
+		echo "  Or override: make bpf-test-vm KERNEL_IMAGE=/path/to/vmlinuz" >&2; \
+		exit 1; \
+	elif ! command -v vmtest >/dev/null 2>&1; then \
+		echo "ERROR: vmtest not on PATH." >&2; \
+		echo "  Install: cargo install vmtest" >&2; \
+		exit 1; \
+	else \
+		echo "ERROR: BPF sources present but bpf-test-vm is not yet implemented." >&2; \
+		echo "  Wire: tooling/vmtest/iomoments.toml config + in-guest test command." >&2; \
 		exit 1; \
 	fi
 

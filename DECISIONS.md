@@ -716,3 +716,126 @@ deferred until the first `src/iomoments.bpf.c` caller exists to
 pressure-test the scale choice. Task #34 tracks the
 implementation; ontology OpenQuestion
 `bpf_fixedpoint_scale_choice` tracks the open math question.
+
+## 2026-04-24
+
+### D012: BPF load / verify / run tests in a VM, not on the host kernel
+
+**Decision.** iomoments' BPF programs are loaded, verifier-checked,
+and functionally tested inside a VM with a **separate kernel
+instance** from the developer's laptop. The host kernel is NEVER
+the target of `bpftool prog load` during development or CI. The
+`make bpf-verify` target (pre-push) and the new `make bpf-test-vm`
+target (functional) both go through a VM. Orchestration tool:
+[`vmtest`](https://github.com/danobi/vmtest) — a purpose-built
+Rust binary for running host-compiled programs against a chosen
+guest kernel.
+
+**Why.** Surfaced 2026-04-24 when asked "can we test eBPF in a
+container that won't crash the laptop?" Containers share the host
+kernel — a BPF program loaded from inside a Docker/Podman
+container runs in the HOST kernel. A verifier-rejected program is
+blocked regardless, but a program that passes verification but
+(a) hangs a hot tracepoint, (b) fills maps beyond memory, or
+(c) exercises a verifier bug still affects the host. `--privileged`
+containers with `CAP_BPF` make the blast radius larger, not
+smaller. Only a VM provides real crash isolation.
+
+**Options considered:**
+
+1. **Containers (`--privileged`, `CAP_BPF`).** Rejected for the
+   reason above — shared kernel.
+2. **QEMU + custom rootfs.** Maximum flexibility; also maximum
+   yak-shaving (rootfs build, serial console, test-output
+   extraction, multi-kernel matrix management). Deferred as the
+   escape hatch if vmtest ever blocks us.
+3. **Firecracker microVM.** Pattern-consistent with fireasmserver
+   (D020, D026). Lower ceremony than raw QEMU but still requires
+   rootfs + API-driven boot choreography. Good for high-throughput
+   VM churn; over-engineered for iomoments' need of "load a BPF
+   program and check the verifier's verdict."
+4. **`vmtest` (chosen).** Built specifically for "run this binary
+   against this kernel in a VM." What upstream Linux BPF
+   self-tests use. virtio-fs maps the iomoments checkout into the
+   guest so the same binary runs host-compiled; no rootfs build
+   step, no test-output extraction plumbing.
+
+**What DOES NOT go in a VM.** Anything that doesn't actually load
+BPF into a kernel stays in ordinary containers or on the bare
+host:
+- `clang -target bpf` compile (produces a .bpf.o, no load).
+- clang-tidy / cppcheck / scan-build on BPF source.
+- Unit tests that stub out libbpf.
+- The C userspace aggregator's non-BPF logic.
+
+These are already covered by the D008 lint stack and the C test
+driver. The VM is specifically for "run the verifier" and "run
+the loaded program against synthetic I/O."
+
+**Kernel-under-test selection.** First cut: the developer's host
+kernel (copied via `sudo cp /boot/vmlinuz-$(uname -r)` to a
+user-readable location — distros ship vmlinuz at mode 0600 under
+/boot/). Matrix-expansion (test against 5.15 / 6.1 / 6.6 / 6.12
+simultaneously) is deferred; when real BPF code stabilizes and
+the kernel-version sensitivity becomes a concern, a follow-up
+D-entry captures the matrix choice. For now, "your laptop kernel"
+is the target the developer actually cares about.
+
+**Gate placement in the pipeline.**
+
+- **Pre-commit:** no change. Already C-lint-only; VM adds too much
+  latency.
+- **Pre-push `make bpf-verify`** (D008/D009 stub): switches from
+  host-side `bpftool prog load` (current tripwire) to VM-side
+  verifier load once `src/iomoments.bpf.c` exists. ~3-5 s per push
+  on vmtest's cold boot; tolerable at pre-push cadence.
+- **Pre-push `make bpf-test-vm`** (NEW, deferred until first BPF
+  source): functional tests — load the program, attach to the
+  synthetic tracepoint, generate samples, verify the BPF program
+  produced the expected output via perf events or a map readout.
+  Same VM, longer boot + exercise window (~15-30 s). May move to
+  CI-only if pre-push cost becomes too high.
+- **CI:** runs the same gates with a downloaded canonical kernel
+  rather than the developer's laptop kernel. The GH-Actions job
+  pulls `linux-image-kvm` (Ubuntu canonical KVM-optimized image)
+  or a pinned vanilla kernel.
+
+**Current-state commitments this commit makes:**
+
+- Makefile stub target `bpf-test-vm` that gracefully no-ops when
+  no BPF sources exist (same pattern as `bpf-verify`). Docstring
+  + fail-clearly message name the expected kernel image path
+  (`~/kernel-images/vmlinuz-host` by default; overridable via
+  `KERNEL_IMAGE` env var) and the one-time sudo-copy command the
+  developer runs to populate it.
+- Ontology: new DomainConstraint
+  `bpf_programs_tested_in_vm_not_host` (status=spec) naming the
+  policy; implementation_refs + verification_refs populate when
+  the vmtest invocation actually fires.
+
+**Deferred until first BPF source:**
+
+- The vmtest config file itself (`tooling/vmtest/iomoments.toml`
+  or CLI-flag equivalent). Its shape depends on what BPF program
+  attach-type we're testing and what in-guest command exercises
+  it — both unknown until the first program exists.
+- The CI kernel-download step.
+- The VM kernel matrix (test against multiple kernel versions
+  simultaneously). When this lands it gets its own D-entry.
+
+**Cross-refs:**
+- D008 — C static-analysis stack; vmtest sits in the same
+  pre-push tier as the four engines.
+- D011 — BPF fixed-point arithmetic; the round-trip property test
+  (pebay_bpf vs pebay double) runs inside vmtest once the
+  fixed-point header exists.
+- D009 `per_cpu_update_bytes` perf constraint — exercised by
+  functional tests inside the VM, not on the host.
+- fireasmserver D022 / D024 / D025 — VM-test infrastructure
+  patterns that we're re-deriving in a much smaller shape for
+  iomoments (no Pi 5, no bridge network, no multi-VM parallelism
+  — just one vmtest invocation against one guest kernel).
+
+**Status:** design + plumbing shipping with this commit; the
+vmtest invocation itself lands when `src/iomoments.bpf.c`
+exists and there's a concrete BPF program to verify-load.
