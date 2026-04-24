@@ -71,11 +71,53 @@ faster and characterize tail shape more directly.
 
 ## Status
 
-Pre-code. The design log is in `DECISIONS.md`. The build and quality-
-gate pipeline design is in `CD-PIPELINE-PROPOSAL.md`. No source code,
-no repository yet — this is the design-crystallization stage.
+**Beta foundations are in place, pre-release.** As of 2026-04-24 the
+repository contains:
 
-A progress section will be added once implementation begins.
+- **`src/pebay.h`** — userspace-canonical Welford (Pébay k=2)
+  running summary in `double`. Property-tested against textbook
+  fixtures and scipy.
+- **`src/pebay_bpf.h`** — BPF-safe fixed-point counterpart. Q32.32
+  signed-ns running mean + int64 ns² sum-of-squared-deviations.
+  Round-trip-tested against `pebay.h` with documented tolerance
+  (~2.6e-5 relative on μs-scale streams).
+- **`src/iomoments.bpf.c`** — BPF program that attaches to a
+  tracepoint, updates a per-CPU running summary via
+  `pebay_bpf.h`, exposes it through `BPF_MAP_TYPE_PERCPU_ARRAY`
+  for userspace aggregation. Current attach point is a
+  placeholder on `raw_tracepoint/sys_enter`; the block-layer
+  `block_rq_issue → block_rq_complete` latency pairing per D007
+  lands in a follow-up.
+- **`tooling/src/iomoments_ontology/`** — Pydantic-typed
+  formal-requirements DAG forked from python_agent. 18 ontology
+  entries, all refs resolve against the working tree, audit gate
+  fires on every push.
+- **`tooling/src/audit_ontology/`** — traceability audit tool
+  that cross-references every constraint's
+  `implementation_refs` / `verification_refs` against the
+  committed code. Wired into pre-push and CI.
+- **kernel-matrix VM testing** — every push exercises
+  `iomoments.bpf.o` against four vmtest-built guest kernels
+  (5.15 / 6.1 / 6.6 / 6.12, fedora38 preset) via
+  `make bpf-test-vm-matrix`. D012 guarantees iomoments never
+  loads BPF on the host kernel.
+
+### Still to land before first beta trial
+
+- Real block-layer attach (`tracepoint/block/block_rq_issue` +
+  `block_rq_complete` with HASH-map-keyed timestamp pairing).
+- Userspace loader (`src/iomoments.c`): libbpf, per-CPU map
+  readout, `pebay.h` parallel-merge, first reporting output.
+- First diagnostic signal implementation (Hill tail-index
+  estimator per D007) and the Green/Yellow/Amber/Red verdict
+  emission.
+- Higher-moment extension (M3, M4) in both `pebay.h` and
+  `pebay_bpf.h`.
+
+Design log: **`DECISIONS.md`** (D001–D012). CD-pipeline design
+lives in **`CD-PIPELINE-PROPOSAL.md`** (some sections superseded
+by D008/D009/D010/D012; supersession banners at the top point
+forward).
 
 ## License and contributions
 
@@ -83,10 +125,10 @@ AGPL-3.0-or-later. See `LICENSE` for the full license text and
 `COPYRIGHT` for the project notice, contribution policy, and commercial-
 licensing contact path.
 
-The BPF program source file (`src/iomoments.bpf.c`, once written) will
-be dual-licensed `(GPL-2.0-only OR AGPL-3.0-or-later)` for kernel-ABI
-reasons (the kernel's `license_is_gpl_compatible()` allowlist does not
-recognize the literal string "AGPL"). Rationale in `DECISIONS.md` D001.
+The BPF program source file (`src/iomoments.bpf.c`) is dual-licensed
+`(GPL-2.0-only OR AGPL-3.0-or-later)` for kernel-ABI reasons (the
+kernel's `license_is_gpl_compatible()` allowlist does not recognize
+the literal string "AGPL"). Rationale in `DECISIONS.md` D001.
 
 External contributions are not accepted. Bug reports via GitHub issues
 are welcome; fixes described in issues may be reimplemented by the

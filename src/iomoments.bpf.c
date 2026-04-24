@@ -2,32 +2,32 @@
 /* Copyright (C) 2026 Ed Hodapp <ed@hodapp.com> */
 
 /*
- * iomoments BPF program — skeleton.
+ * iomoments BPF program.
  *
- * This is the first load-bearing BPF object in iomoments. Today
- * it attaches to the sys_enter raw tracepoint and returns
- * immediately; its purpose is to exercise the full BPF toolchain
- * end-to-end:
+ * Attaches to the raw syscall-enter tracepoint and accumulates a
+ * per-CPU running summary of the ktime_ns sample using pebay_bpf.h
+ * (D011 fixed-point Welford). Userspace reads the per-CPU maps,
+ * merges them via pebay.h (D006 canonical math), and reports
+ * moments + verdicts per D007.
  *
- *   clang -target bpf -> build/iomoments.bpf.o
- *   vmtest (D012) boots a guest kernel from $(KERNEL_IMAGE)
- *   bpftool prog load iomoments.bpf.o inside the guest
- *   the guest verifier accepts or rejects
- *
- * Real Pébay math (src/pebay_bpf.h, pending per D011) inlines into
- * a richer attach point — block_rq_issue or similar per D007 — in a
- * follow-up commit once the toolchain is gate-proven. Per-CPU maps,
- * perf buffers, CO-RE relocations all belong to that commit, not
- * this one.
+ * Current scope: sys_enter attach as a stand-in for the final
+ * block-layer instrumentation (D007 specifies block_rq_issue →
+ * block_rq_complete latency pairing). sys_enter exercises the BPF
+ * map + helper + fixed-point update chain against real sample
+ * values — the infrastructure piece. Block-layer pairing is its
+ * own follow-up because the ABI for block tracepoint args varies
+ * between kernel versions (CO-RE relocations required) and the
+ * issue→complete timestamp pairing needs a HASH map keyed by
+ * request pointer. Those are additive; this foundation stands.
  *
  * **Dual-licensed** (GPL-2.0-only OR AGPL-3.0-or-later). D001
- * rationale: the kernel's license_is_gpl_compatible() allowlist in
- * kernel/bpf/core.c doesn't recognize the literal string "AGPL",
- * even though AGPL-3.0 is GPL-compatible via AGPL §13. The
- * GPL-2.0-only branch is what grants BPF programs access to
- * GPL-only tracing helpers (bpf_probe_read_kernel, bpf_get_stackid,
- * etc.); the AGPL-3.0-or-later branch keeps the project's license
- * identity consistent.
+ * rationale: the kernel's license_is_gpl_compatible() allowlist
+ * in kernel/bpf/core.c does not recognize the literal string
+ * "AGPL", even though AGPL-3.0 is GPL-compatible via AGPL §13.
+ * The GPL-2.0-only branch grants BPF programs access to GPL-only
+ * tracing helpers (bpf_probe_read_kernel, bpf_get_stackid,
+ * etc.); the AGPL-3.0-or-later branch keeps the project's
+ * license identity consistent.
  */
 
 #include <linux/bpf.h>
@@ -36,44 +36,60 @@
 #include "pebay_bpf.h"
 
 /*
- * The kernel's BPF loader identifies the program's license by reading
- * the contents of the ELF `license` section (placed here via the SEC
- * macro), not by the C variable's name. The name `_license` is a
- * libbpf-ecosystem convention — every BPF program in the tree uses
- * it, and libbpf's own generated skeletons assume it — so we keep it
- * for consistency rather than because the C identifier itself has a
- * kernel-ABI meaning. Reserved-identifier warning fires on the
- * leading-underscore form regardless; suppressed inline.
+ * The kernel's BPF loader identifies the program's license by
+ * reading the contents of the ELF `license` section (placed here
+ * via the SEC macro), not by the C variable's name. The name
+ * `_license` is a libbpf-ecosystem convention; libbpf's generated
+ * skeletons assume it.
  */
 /* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
 char _license[] SEC("license") = "GPL";
 
 /*
- * Dummy per-CPU-ish summary so pebay_bpf.h's inline functions end up
- * in the BPF ELF and get verified by the kernel. The real attach
- * point + map-backed summary lands in the next commit; this just
- * proves the fixed-point header compiles and loads under -target bpf.
+ * Per-CPU running summary. Each CPU maintains its own
+ * iomoments_summary_bpf, accumulated lock-free. Userspace reads
+ * all CPUs' entries (BPF maps expose the per-CPU array as one
+ * value per CPU) and merges them via pebay.h's Pébay
+ * parallel-combine rule.
+ *
+ * Single-key map (key=0): iomoments currently tracks one global
+ * summary. Future extensions may key by (dev_major, dev_minor)
+ * or similar to segment by I/O device; that's orthogonal to the
+ * fixed-point math.
  */
-/* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
-static struct iomoments_summary_bpf _iomoments_compile_check =
-	IOMOMENTS_SUMMARY_BPF_ZERO;
-
 /*
- * The BPF loader finds this function by its ELF section
- * ("raw_tracepoint/sys_enter"), not by a C-level caller. cppcheck's
- * static view sees no C reference and its whole-program
- * unusedFunction check fires on every BPF handler; suppression is
- * file-scoped in tooling/cppcheck.suppress rather than inline
- * because inline suppresses don't stick for whole-program checks.
+ * Map declaration uses __uint(key_size, ...) + __uint(value_size, ...)
+ * rather than the newer __type(key, ...) / __type(value, ...) macros
+ * because __type expands to `typeof(val) *name` and -Wpedantic flags
+ * typeof as a GNU extension. Functionally equivalent; libbpf
+ * recognizes both forms.
  */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(struct iomoments_summary_bpf));
+} iomoments_summary SEC(".maps");
+
 SEC("raw_tracepoint/sys_enter")
-int iomoments_noop(void *ctx)
+int iomoments_record_event(void *ctx)
 {
 	(void)ctx;
-	/* Exercise pebay_bpf.h so the fixed-point update function is
-	 * emitted into the BPF object and faces the verifier. Sample
-	 * value 1 is arbitrary; we're proving the toolchain + verifier
-	 * accept the math, not producing useful measurements yet. */
-	iomoments_summary_bpf_update(&_iomoments_compile_check, 1);
+	__u32 key = 0;
+	struct iomoments_summary_bpf *s =
+		bpf_map_lookup_elem(&iomoments_summary, &key);
+	if (!s) {
+		return 0;
+	}
+	/*
+	 * sys_enter fires at every syscall boundary. As a stand-in
+	 * sample we take the current nanosecond timestamp modulo a
+	 * bounded window so x stays under the Q32.32 limit in
+	 * pebay_bpf.h. Real I/O-latency instrumentation computes
+	 * (complete_ns - issue_ns) and feeds that in; the math is
+	 * identical.
+	 */
+	__u64 t_ns = bpf_ktime_get_ns();
+	iomoments_summary_bpf_update(s, t_ns & 0x3FFFFFFFULL);
 	return 0;
 }
