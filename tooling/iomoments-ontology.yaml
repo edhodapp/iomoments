@@ -364,21 +364,23 @@ domain_constraints:
       `bpftool prog load` during development or CI. Orchestration
       via vmtest; `make bpf-test-vm` loads the compiled BPF object
       into the guest kernel and reports the verifier's verdict.
-      First successful in-VM load: iomoments.bpf.c against a
-      vmtest-built 5.15-fedora38 kernel, 2026-04-24 — the
-      raw_tracepoint program loaded with `xlated 16B jited 15B
-      btf_id 7`.
+      `make bpf-test-vm-matrix` sweeps the full D001-floor-through-
+      recent-stable kernel set (5.15 / 6.1 / 6.6 / 6.12, all built
+      with vmtest's fedora38 preset) — all four accepted the
+      iomoments.bpf.o raw_tracepoint program on 2026-04-24.
     rationale: >
       D012 — containers share the host kernel, so a BPF program
       that passes the verifier but hangs a hot tracepoint or
       exploits a verifier bug can still crash the laptop. Only a
       VM provides real crash isolation. Proven end-to-end
-      2026-04-24 on 5.15-fedora38.
+      2026-04-24 on all four matrix kernels; sweep log at
+      tooling/vmtest/matrix-sweep-2026-04-24.log.
     implementation_refs:
       - "Makefile:bpf-test-vm"
       - "Makefile:bpf-test-vm-matrix"
     verification_refs:
       - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
+      - "tooling/vmtest/matrix-sweep-2026-04-24.log"
     status: tested
 
 # --- Performance constraints --------------------------------------------
