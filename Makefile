@@ -223,6 +223,7 @@ lint-c-cppcheck:
 	else \
 		$(CPPCHECK) --enable=all --inconclusive --std=c11 \
 		  --error-exitcode=1 \
+		  --inline-suppr \
 		  --suppressions-list=$(CPPCHECK_SUPPRESS) \
 		  --suppress=missingIncludeSystem \
 		  --suppress=unmatchedSuppression \
