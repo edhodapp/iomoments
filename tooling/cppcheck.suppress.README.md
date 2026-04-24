@@ -29,8 +29,24 @@ If the rule is only wrong in one place, use `// cppcheck-suppress <id>`
 inline at the call site instead, with the same two-point rationale
 as a C comment on the line above.
 
-## Status
+## Current entries
 
-Empty today. No cppcheck findings against `src/hello_world.c` require
-global suppressions. As real source lands, entries added here should
-be rare; expect most suppressions to be inline.
+### `unusedFunction:src/*.bpf.c`
+
+Suppresses cppcheck's `unusedFunction` check on every BPF source
+file under `src/`. BPF programs declare handler functions that the
+kernel's BPF loader finds by their `SEC(...)` ELF section, not by a
+C-level caller. cppcheck's static view sees no caller and flags
+`unusedFunction`; the check is whole-program so an inline suppress
+at the function site doesn't take. File-scoped here because every
+BPF program hits the same pattern.
+
+Revisit: if cppcheck ever grows BPF-section awareness (or we
+switch to a C-analyzer that does), drop this entry.
+
+## Revisit policy
+
+As real source lands, entries added here should be rare; expect
+most suppressions to be inline. The BPF entry above is a
+structural exception — every BPF handler looks the same to
+cppcheck.

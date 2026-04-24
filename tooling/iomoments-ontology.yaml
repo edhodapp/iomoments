@@ -332,7 +332,11 @@ domain_constraints:
       iomoments is a Linux eBPF tool. BSD classic BPF, FreeBSD eBPF
       port, DTrace are OUT of scope. Minimum kernel 5.15 for CO-RE.
     rationale: "D001 platform decision."
-    status: spec
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_noop"
+    verification_refs:
+      - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
+    status: tested
 
   - name: bpf_inline_arithmetic_is_float_free
     description: >

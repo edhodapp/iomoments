@@ -56,13 +56,24 @@ jobs:
         # tooling/tests) would silently miss such files.
         run: mypy --strict tests tooling
 
-      - name: Install C toolchain for test-c
-        # pytest's test_pebay_c_driver_passes shells out to the compiled
-        # C test binary; build it here so pytest isn't forced to skip.
-        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install C toolchain for test-c + BPF compile
+        # clang for userspace C tests (test_pebay_c_driver_passes).
+        # clang + libbpf-dev + bpftool + linux-libc-dev for BPF compile +
+        # static BTF dump (test_bpf_verify_passes). No in-kernel load
+        # happens on CI runners — that's vmtest territory per D012.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libbpf-dev \
+            bpftool \
+            linux-libc-dev
 
       - name: Build + run C test suite
         run: make test-c
+
+      - name: Compile + statically verify BPF objects
+        run: make bpf-verify
 
       - name: pytest --cov --cov-branch
         run: pytest
@@ -117,9 +128,12 @@ jobs:
       - name: lint-c (four engines)
         run: make lint-c
 
-      - name: bpf-verify (stub)
-        # No BPF sources today; target exits 0. Real bpftool prog load
-        # lands in a separate kernel-in-a-box job once iomoments.bpf.c
-        # exists — GitHub runners' fixed kernels make an in-runner load
-        # fragile.
+      - name: Install libbpf for BPF compile
+        run: sudo apt-get install -y libbpf-dev bpftool linux-libc-dev
+
+      - name: bpf-verify (static BTF inspection)
+        # Compiles src/*.bpf.c and runs bpftool btf dump on the outputs.
+        # Does NOT load into the runner's kernel (D012). In-kernel
+        # verification lives in bpf-test-vm and runs inside a vmtest
+        # guest with a purpose-built kernel.
         run: make bpf-verify

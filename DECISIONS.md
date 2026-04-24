@@ -839,3 +839,41 @@ is the target the developer actually cares about.
 **Status:** design + plumbing shipping with this commit; the
 vmtest invocation itself lands when `src/iomoments.bpf.c`
 exists and there's a concrete BPF program to verify-load.
+
+**Addendum 2026-04-24** (discoveries while wiring the first BPF
+skeleton):
+
+1. **vmtest requires 9p/virtio built-in, not modular.** The guest
+   boots straight into a 9p-rootfs mount of the host's filesystem
+   without an initramfs, so `CONFIG_VIRTIO{,_PCI,_CONSOLE}=y`,
+   `CONFIG_9P_FS=y`, and `CONFIG_NET_9P{,_VIRTIO}=y` must be
+   `=y`. Ubuntu's `/boot/vmlinuz-*` is modular for every one.
+   Resolution: build vmtest-ready kernels via vmtest's own
+   `scripts/build_kernel.sh` (Alpine + kernel.org source inside
+   a container; works with both Docker and podman via the
+   `podman-docker` shim).
+
+2. **vmtest's `default` kernel preset does NOT enable BPF.** It
+   runs `make defconfig` which on x86_64 leaves `CONFIG_BPF_SYSCALL`
+   unset or incomplete — `bpftool prog load` fails inside the
+   guest with "Couldn't load trivial BPF program." The vmtest
+   repo ships an alternative preset `fedora38` that enables a
+   complete BPF feature set (`CONFIG_BPF{,_SYSCALL,_JIT,_LSM,_EVENTS}=y`,
+   `CONFIG_FTRACE_SYSCALLS=y`, `CONFIG_KPROBES=y`, etc.).
+   Resolution: build the matrix with `fedora38` preset
+   (`./scripts/build_kernel.sh v<ver> fedora38`) so iomoments'
+   BPF programs can actually load inside the guest.
+
+3. **Ubuntu's `/usr/sbin/bpftool` is a `uname -r` shim** that
+   looks up `/usr/lib/linux-tools/<running-kernel>/bpftool`.
+   Inside a vmtest guest running a different kernel, the shim
+   finds nothing. Resolution: resolve the real versioned bpftool
+   binary at host-side before invoking vmtest (`make bpf-test-vm`
+   does this via `ls /usr/lib/linux-tools/*/bpftool | sort -V |
+   tail -1`).
+
+**Matrix kernel selection.** 5.15 (iomoments' floor per D001) +
+6.1 / 6.6 / 6.12 (LTS lines through a recent stable). All built
+with the `fedora38` preset; products live at
+`~/kernel-images/vmlinuz-v<version>`. `make bpf-test-vm-matrix`
+sweeps them.
