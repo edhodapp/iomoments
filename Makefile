@@ -60,7 +60,9 @@ CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 
 .PHONY: help venv install-hooks test \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
-        lint-c-scanbuild fmt-check bpf-verify clean gate-local distclean
+        lint-c-scanbuild fmt-check bpf-verify \
+        build-ontology gate-ontology \
+        clean gate-local distclean
 
 help:
 	@echo "iomoments make targets:"
@@ -72,7 +74,9 @@ help:
 	@echo "  lint-c         Four-engine C static analysis per D008."
 	@echo "  fmt-check      clang-format --dry-run --Werror on all C files."
 	@echo "  bpf-verify     bpftool prog load on .bpf.o (stub until first .bpf.c)."
-	@echo "  gate-local     Full pre-push check: shellcheck + pytest + all lints."
+	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
+	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
+	@echo "  gate-local     Full pre-push check: shellcheck + pytest + lints + ontology."
 	@echo "  clean          Remove caches."
 	@echo "  distclean      clean + remove .venv."
 
@@ -213,9 +217,21 @@ bpf-verify:
 	fi
 
 # ---------------------------------------------------------------------------
+# Ontology gate (D010). build-ontology is idempotent — no-op if the YAML
+# content hash matches the DAG's current node. gate-ontology rebuilds
+# first so the audit always reads an up-to-date DAG (catches "edited the
+# YAML, forgot to rebuild" drift), then audits with --exit-nonzero-on-gap.
+# ---------------------------------------------------------------------------
+build-ontology: $(VENV_STAMP)
+	$(VENV)/bin/build-iomoments-ontology
+
+gate-ontology: build-ontology
+	$(VENV)/bin/audit-ontology --exit-nonzero-on-gap
+
+# ---------------------------------------------------------------------------
 # Meta.
 # ---------------------------------------------------------------------------
-gate-local: lint test
+gate-local: lint test gate-ontology
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		find tooling -type f -name '*.sh' -print0 \
 		  | xargs -0 -r shellcheck; \

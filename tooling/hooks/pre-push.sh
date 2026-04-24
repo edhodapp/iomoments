@@ -55,6 +55,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Ontology gate — rebuild the DAG from YAML (idempotent; no-op if content
+# unchanged), then audit with --exit-nonzero-on-gap. Per D010: level-1
+# traceability (refs point at real files/symbols) + status/refs consistency.
+#
+# Ordering invariant: this block runs AFTER pytest. If a pytest regression
+# breaks the audit tool itself, pytest fails first and the ontology gate
+# never runs — ontology drift cannot be masked by a broken verdict. Don't
+# reorder without preserving that invariant.
+# ---------------------------------------------------------------------------
+echo ""
+echo ">>> ontology gate (D010)"
+if [ -d ".venv" ] && [ -f ".venv/bin/audit-ontology" ]; then
+    if ! make gate-ontology; then
+        FAILED=1
+    fi
+else
+    echo "ERROR: no .venv/bin/audit-ontology — run 'make venv' first." >&2
+    FAILED=1
+fi
+
+# ---------------------------------------------------------------------------
 # C-side gates — four independent engines plus clang-format, all driven
 # through the Makefile so local and CI run identical invocations. Each
 # target no-ops gracefully when its inputs don't exist (e.g., fmt-check

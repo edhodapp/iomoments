@@ -507,3 +507,88 @@ not claim.
 
 **Status:** P1 shipped (this commit). P2–P7 tracked in the active
 task list; expect ~1 commit per phase.
+
+### D010: audit-ontology as closing pre-push and CI gate
+
+**Decision (2026-04-23).** Every push to `origin/main` and every CI
+build on `main` / PR branches must pass
+`audit-ontology --exit-nonzero-on-gap`, which fails when any
+`implementation_refs` / `verification_refs` entry in the current
+ontology DAG node doesn't resolve against the working tree or when
+status ↔ refs consistency rules are violated. The gate lives in
+`tooling/hooks/pre-push.sh` alongside the C static-analysis engines
+and the Python test suite, and in `.github/workflows/ci.yml` as a
+step within the existing `python-gates` job.
+
+**Why.** The ontology's value as formal requirements (D009) depends
+on refs pointing at code that actually exists. Without an enforced
+gate, constraint rows can claim traceability they don't have and
+the claim rots silently between commits. The gate closes that loop:
+a typo in a ref, a renamed symbol, or a constraint bumped to
+`status="implemented"` without refs fails the push before it reaches
+`origin/main`.
+
+**Scope: level 1 traceability only.** The audit tool implements
+D021's three-level verification chain at level 1 only — "does the
+named file/symbol exist?" Levels 2 (structural coverage via
+pytest-cov) and 3 (mutation verification) are substantively bigger
+commitments deferred until the first real C code needs them. The
+gate is conservative: a ref that grep-resolves passes even if the
+linked test doesn't actually exercise the enforcement code. As
+iomoments matures, tightening the gate is a separate D-entry.
+
+**Why pre-push, not pre-commit.** The audit re-reads the whole DAG
+and resolves every ref against the working tree — cheap today but
+grows linearly with the constraint set. The class of drift it
+catches is cross-commit coherence (the JSON was built from a
+different YAML, a ref points at a symbol that moved), not per-file
+correctness. Consistent with the existing split (D008): quality
+gates at pre-commit; integration and coherence gates at pre-push.
+
+**Why `--exit-nonzero-on-gap` is opt-in.** The human-readable
+invocation `audit-ontology` stays exit-0 so manual inspection of
+the matrix is friction-free. Scripts and hooks opt in via the
+explicit flag. Matches fireasmserver D051's stance verbatim.
+
+**Exit-code taxonomy.** The CLI distinguishes tooling errors (bad
+DAG path, malformed JSON — exit 2) from gap findings (exit 1) from
+clean (exit 0). CI failure messages can tell apart "your code has
+gaps" from "the audit tool broke." Standard Unix convention
+(diff, grep).
+
+**Implementation:**
+
+- `tooling/hooks/pre-push.sh`: new block after the Python test suite
+  and before the C gates. Invokes `make gate-ontology` (or the bare
+  console script when venv is present) and propagates exit status.
+  The pre-push also runs `build-iomoments-ontology` first so the
+  gate reads an up-to-date DAG — otherwise a YAML edit without a
+  rebuild would audit the stale JSON.
+- `.github/workflows/ci.yml`: step added to the `python-gates` job
+  after pytest. Same invocation sequence (build then audit).
+- `Makefile`: new `gate-ontology` target wrapping the build + audit.
+  Included in `gate-local` so developers can run the full local
+  check without pushing.
+
+**What the gate does NOT catch (documented deferrals):**
+
+- Drift between the YAML source and the JSON DAG. The pytest suite's
+  `test_shipped_json_matches_shipped_yaml` catches that; the audit
+  tool reads from JSON only.
+- Structural coverage (D021 level 2). Needs pytest-cov integration
+  keyed on constraint names. Separate D-entry when it lands.
+- Mutation verification (D021 level 3). Needs `mutmut` or equivalent
+  wired to run per-constraint.
+
+**Cross-refs:**
+- D009 — the ontology schema this gate enforces.
+- D008 — sibling pre-push gate (four-engine C stack); same "fail on
+  drift" posture.
+- D021 (fireasmserver) — three-level verification origin, of which
+  we implement level 1.
+- D051 (fireasmserver) — the policy this decision mirrors verbatim
+  for iomoments.
+
+**Status:** shipping with this commit. Expect the gate to fire
+cleanly today (17 rows, all status=spec, zero refs); it tightens
+naturally as implementation_refs / verification_refs get populated.

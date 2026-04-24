@@ -34,7 +34,9 @@ jobs:
           python -m pip install -e '.[dev]'
 
       - name: flake8
-        run: flake8 tests
+        # Walks both the numerical-oracle tests/ tree and the ontology
+        # tooling/ tree. Matches the Makefile's lint-python target.
+        run: flake8 tests tooling
 
       - name: pylint
         # Uses the repo-committed pylintrc (snapshot of the Google style
@@ -45,13 +47,25 @@ jobs:
             echo "::error::pylintrc missing at repo root — pylint gate can't run."
             exit 1
           fi
-          pylint --rcfile=pylintrc tests
+          pylint --rcfile=pylintrc tests tooling
 
       - name: mypy --strict
-        run: mypy --strict tests
+        # `tests tooling` matches the Makefile's find-based walk. If
+        # a loose script lands at e.g. tooling/script.py, CI still
+        # sees it; naming specific subdirectories (tooling/src,
+        # tooling/tests) would silently miss such files.
+        run: mypy --strict tests tooling
 
       - name: pytest --cov --cov-branch
         run: pytest
+
+      - name: ontology gate (D010)
+        # Rebuild the DAG from YAML (idempotent; no-op if content hash
+        # matches) and audit it with --exit-nonzero-on-gap. Catches
+        # ref typos + status↔refs inconsistencies.
+        run: |
+          build-iomoments-ontology
+          audit-ontology --exit-nonzero-on-gap
 
   shell-gates:
     name: Shell script lint
