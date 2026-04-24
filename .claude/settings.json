@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make lint)",
+      "Bash(make lint-c)",
+      "Bash(make lint-python)",
+      "Bash(make fmt-check)",
+      "Bash(make help)",
+      "Bash(podman ps)",
+      "Bash(podman images)",
+      "Bash(vmtest --help)"
+    ]
+  }
+}
