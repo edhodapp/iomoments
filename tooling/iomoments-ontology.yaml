@@ -334,6 +334,24 @@ domain_constraints:
     rationale: "D001 platform decision."
     status: spec
 
+  - name: bpf_inline_arithmetic_is_float_free
+    description: >
+      The BPF program's hot-path arithmetic MUST NOT use floating-
+      point. The BPF verifier rejects FP instructions in tracing
+      attach points; the kernel does not save/restore FP registers
+      per-invocation for those contexts. src/pebay.h (double-based)
+      stays for userspace + testing; the BPF path uses a separate
+      fixed-point header src/pebay_bpf.h (pending) whose results
+      match the userspace reference on integer-valued streams
+      within a documented tolerance.
+    entity_ids: [moment, probe]
+    rationale: >
+      D011 — surfaced by the pre-commit Gemini review of src/pebay.h
+      on 2026-04-23 and captured as an architectural commitment on
+      2026-04-24. Scale choice deferred to first-use per D021
+      draft-first; see OpenQuestion bpf_fixedpoint_scale_choice.
+    status: spec
+
 # --- Performance constraints --------------------------------------------
 #
 # All budgets are spec-level targets today — no measured values exist
@@ -484,3 +502,19 @@ open_questions:
       is the grounding. Draft the signal set when the first real
       measurement harness lands.
     priority: medium
+
+  - id: bpf_fixedpoint_scale_choice
+    text: >
+      What fixed-point representation does src/pebay_bpf.h (pending,
+      per D011) use for m1 and m2? Candidates: Q32.32 int64_t m1 +
+      int128-emulated m2; periodic-spill scheme where m2 is
+      flushed to userspace before saturation; rolling-rescale with
+      a shift-factor field; full offload where BPF keeps only m1
+      plus a raw-sample ring buffer and userspace computes m2.
+    context: >
+      D011 defers this choice to first-BPF-use per D021 draft-first.
+      The D009 per_cpu_update_bytes budget (64 bytes) constrains
+      the encoding at k=2 and pressures it further at k=4. Whichever
+      encoding ships must pass the pebay_bpf-vs-pebay round-trip
+      property test within a documented tolerance.
+    priority: high

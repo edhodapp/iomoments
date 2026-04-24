@@ -592,3 +592,127 @@ gaps" from "the audit tool broke." Standard Unix convention
 **Status:** shipping with this commit. Expect the gate to fire
 cleanly today (17 rows, all status=spec, zero refs); it tightens
 naturally as implementation_refs / verification_refs get populated.
+
+### D011: BPF-inline arithmetic is fixed-point; double stays in userspace
+
+**Decision (2026-04-24).** `src/pebay.h` (double-based, shipped in
+`6fbdac7`) remains iomoments' **userspace reference + testing
+oracle**. The kernel-side BPF program will use a **separate header
+`src/pebay_bpf.h`** with a fixed-point running summary that the BPF
+verifier accepts. A round-trip test pins the two implementations to
+agree on integer-valued input streams within a stated tolerance.
+
+**Why this split exists.** Gemini's pre-commit review of `6fbdac7`
+surfaced the concern: "BPF verifier and JIT typically reject
+floating-point instructions as the kernel does not save/restore
+floating-point registers for BPF programs." That's accurate for
+tracing-attach points (kprobes, tracepoints, fentry, perf-event)
+which is where iomoments attaches. Recent kernels have narrow FP
+exceptions via `kernel_fpu_begin/end`, but those don't extend to
+the tracing contexts iomoments needs.
+
+**Options considered, rejected:**
+
+1. **Naive sum-of-powers in BPF** (track `Σxᵏ` directly, compute
+   moments in userspace as linear combinations). Rejected by D006
+   explicitly: catastrophic cancellation makes higher moments
+   unusable on realistic sample streams. The problem compounds at
+   k=3 and k=4.
+2. **Double everywhere, load BPF at a context that allows FP.**
+   Narrow, brittle, couples the tool to a specific kernel
+   configuration, and still fails in most real deployments.
+3. **Kernel-FPU guard around the hot path**
+   (`kernel_fpu_begin/end` inside the BPF program). Not exposed to
+   BPF programs; not portable.
+
+**Chosen approach — dual-header split:**
+
+1. `src/pebay.h` (already shipped): double-based. Stays canonical
+   for userspace aggregation, testing, and the Python oracle
+   comparison. Unchanged.
+2. `src/pebay_bpf.h` (pending): fixed-point running summary + update
+   + merge, with a concrete scale choice (see deferral below). The
+   BPF program (`src/iomoments.bpf.c`, also pending) inlines this
+   header. Userspace reads per-CPU summaries via libbpf, converts
+   to double, and runs the canonical merge from `pebay.h` for final
+   aggregation.
+3. `tests/c/test_pebay_bpf_vs_double.c` (pending): property test —
+   the same integer sample stream fed through both implementations
+   must produce moments that agree within an ULP-scale tolerance
+   documented in the test. This is the invariant that keeps the
+   two headers from silently drifting.
+
+**Scale-choice DEFERRED to first-BPF-use (draft-first per D021).**
+The numerical representation of the fixed-point summary — Q-format
+bit allocation, m2 accumulator layout, overflow handling — is NOT
+locked in this decision. Open considerations:
+
+- **m1 (running mean) in Q-format int64_t.** Mean is bounded by the
+  sample range. Ns-scale integer inputs (from `bpf_ktime_get_ns`)
+  plus ~30 bits of fractional precision covers the delta/n update
+  precision up to ~10⁹ samples.
+- **m2 (sum of squared deviations) is the hard part.** At k=2
+  alone, m2 can grow to n·σ² which exceeds int64_t for realistic n
+  and σ. Candidate encodings:
+  - int128-emulated accumulator (two int64_t, hi + lo) with
+    overflow-safe addition.
+  - Periodic spill: BPF program kicks the summary to userspace when
+    m2 approaches saturation, userspace aggregates and returns a
+    freshly-scaled zero state.
+  - Rolling rescale: when m2 exceeds a threshold, right-shift the
+    accumulator and remember the shift factor.
+  - Completely offload m2 to userspace: BPF tracks only m1 + raw
+    samples via ring buffer; userspace computes m2 from samples.
+    Loses per-CPU accumulation benefit; highest fidelity.
+- **k=3 / k=4 make this substantially harder.** Cubed and fourth-
+  powered deltas saturate much faster. The scale choice for k=2
+  will inform, but may not dictate, the higher-order choices.
+
+Locking the scale without a real BPF caller to pressure-test it
+against would be premature (D021 rule: crystallize when friction
+appears, not before). The OpenQuestion
+`bpf_fixedpoint_scale_choice` tracks this in the ontology.
+
+**What this decision DOES commit to:**
+
+- The BPF hot path will not use `double`.
+- The double-based `pebay.h` stays canonical for userspace and
+  testing.
+- A round-trip property test holds the two implementations to a
+  stated agreement tolerance.
+- The scale choice is an explicit, first-use-time decision — not
+  allowed to drift silently into the BPF header.
+
+**Ontology implications:**
+
+- `pebay_update_is_numerically_stable` (D007-era constraint, now
+  status=tested for k=2 userspace) gains a sibling when `pebay_bpf.h`
+  lands: `bpf_pebay_update_matches_userspace_reference` with a
+  verification_ref pointing at the round-trip test.
+- `per_cpu_update_bytes` budget (D009 performance constraint,
+  currently 64 bytes) needs to be re-checked against the fixed-
+  point summary's real size — Q-format int64_t for m1 + int128-
+  like m2 + n already pushes 32 bytes at k=2; k=4 will double it.
+  If the budget is too tight, either raise it or pick an encoding
+  that trades fidelity for bytes.
+
+**Cross-refs:**
+- D005 — language split; BPF uses C, userspace uses C, Python is
+  test oracle only. D011 fits inside D005.
+- D006 — Pébay algorithm, rejects sum-of-powers. D011 honors the
+  rejection on the BPF side by NOT using sum-of-powers.
+- D007 — diagnostic layer; all probe-phase math runs in userspace
+  where double is fine, so D007 is unaffected by this split.
+- D009 per_cpu_update_bytes — may need revisiting.
+- fireasmserver D032 — "crypto math implementation strategy:
+  ISA-idiomatic, macros-first, constant-time, cache-aware." The
+  dual-header pattern here is the iomoments analog at a smaller
+  scale: ISA-idiomatic BPF-safe numerics for the kernel path,
+  reference-grade doubles for userspace, pinned by round-trip
+  testing.
+
+**Status:** architectural commitment logged; implementation
+deferred until the first `src/iomoments.bpf.c` caller exists to
+pressure-test the scale choice. Task #34 tracks the
+implementation; ontology OpenQuestion
+`bpf_fixedpoint_scale_choice` tracks the open math question.
