@@ -56,6 +56,14 @@ jobs:
         # tooling/tests) would silently miss such files.
         run: mypy --strict tests tooling
 
+      - name: Install C toolchain for test-c
+        # pytest's test_pebay_c_driver_passes shells out to the compiled
+        # C test binary; build it here so pytest isn't forced to skip.
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build + run C test suite
+        run: make test-c
+
       - name: pytest --cov --cov-branch
         run: pytest
 

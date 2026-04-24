@@ -54,11 +54,16 @@ C_SOURCES       := $(shell find src -maxdepth 2 -type f -name '*.c' \
                      -not -name '*.bpf.c' 2>/dev/null)
 C_HEADERS       := $(shell find src -maxdepth 2 -type f -name '*.h' 2>/dev/null)
 BPF_SOURCES     := $(shell find src -maxdepth 2 -type f -name '*.bpf.c' 2>/dev/null)
-C_ALL           := $(C_SOURCES) $(C_HEADERS) $(BPF_SOURCES)
+C_TEST_SOURCES  := $(shell find tests/c -maxdepth 2 -type f -name '*.c' 2>/dev/null)
+C_ALL           := $(C_SOURCES) $(C_HEADERS) $(BPF_SOURCES) $(C_TEST_SOURCES)
+
+# Build directory for compiled C test binaries.
+BUILD_DIR       := build
+C_TEST_BINS     := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_TEST_SOURCES))
 
 CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 
-.PHONY: help venv install-hooks test \
+.PHONY: help venv install-hooks test test-c \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
         lint-c-scanbuild fmt-check bpf-verify \
         build-ontology gate-ontology \
@@ -68,7 +73,8 @@ help:
 	@echo "iomoments make targets:"
 	@echo "  venv           Create .venv and install dev deps."
 	@echo "  install-hooks  Symlink project hooks into .git/hooks/."
-	@echo "  test           Run pytest with branch coverage."
+	@echo "  test           Run C test suite + pytest with branch coverage."
+	@echo "  test-c         Compile and run C test binaries only."
 	@echo "  lint           Run all lint targets (Python + C)."
 	@echo "  lint-python    flake8 + pylint + mypy --strict on tests/."
 	@echo "  lint-c         Four-engine C static analysis per D008."
@@ -94,8 +100,27 @@ venv: $(VENV_STAMP)
 install-hooks:
 	tooling/hooks/install.sh
 
-test: $(VENV_STAMP)
+test: $(VENV_STAMP) test-c
 	$(PYTEST)
+
+# C test binaries live under $(BUILD_DIR)/. Compiled with the same
+# strict flag set used by lint-c-compile; a warning in the test driver
+# itself is as much a defect as one in the header it exercises.
+$(BUILD_DIR)/%: tests/c/%.c $(C_HEADERS) | $(BUILD_DIR)
+	$(CC_CLANG) $(CFLAGS_LINT_CLANG) -o $@ $< -lm
+
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
+
+test-c: $(C_TEST_BINS)
+	@if [ -z "$(C_TEST_BINS)" ]; then \
+		echo "(no C tests)"; \
+	else \
+		for bin in $(C_TEST_BINS); do \
+			echo "Running $$bin"; \
+			"$$bin" || exit 1; \
+		done; \
+	fi
 
 lint: lint-python lint-c
 
@@ -240,7 +265,7 @@ gate-local: lint test gate-ontology
 	fi
 
 clean:
-	rm -rf .mypy_cache .pytest_cache .coverage
+	rm -rf .mypy_cache .pytest_cache .coverage $(BUILD_DIR)
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
 distclean: clean

@@ -361,15 +361,21 @@ def test_run_audit_flags_consistency_violation(tmp_path: Path) -> None:
 
 
 def test_run_audit_on_shipped_dag() -> None:
-    """The shipped ontology audits clean (spec everywhere, no refs)."""
+    """The shipped ontology audits clean — refs resolve, no consistency gaps.
+
+    As code lands and constraints get implementation_refs /
+    verification_refs populated, the resolver is the load-bearing
+    check: refs_file_missing + refs_symbol_missing must stay at 0 and
+    rows_with_gap must stay at 0. refs_total naturally grows with the
+    codebase, so we don't pin it to a specific number.
+    """
     if not _SHIPPED_DAG.exists() or not _SHIPPED_YAML.exists():
         pytest.skip("shipped artifacts missing")
     report = run_audit(_SHIPPED_DAG, _REPO_ROOT)
-    # Every row today is status=spec; zero refs means zero gaps.
-    assert report.summary.refs_total == 0
     assert report.summary.refs_file_missing == 0
     assert report.summary.refs_symbol_missing == 0
     assert report.summary.rows_with_gap == 0
+    assert report.summary.consistency_violations == 0
 
 
 # --- formatter ----------------------------------------------------------

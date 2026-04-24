@@ -14,6 +14,7 @@ __pycache__/
 *.o
 *.bpf.o
 compile_commands.json
+build/
 
 # Generated kernel type introspection (rebuilt via `bpftool btf dump`)
 src/vmlinux.h

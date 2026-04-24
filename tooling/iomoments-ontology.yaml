@@ -281,10 +281,24 @@ domain_constraints:
     description: >
       Order-k online moment updates must use Pébay's parallel-combine
       formulation; naive sum-of-powers accumulation is forbidden.
+      CURRENT COVERAGE: k=2 only (Welford mean + variance with parallel
+      merge). Higher moments (M3, M4) land with follow-up Pébay
+      updates; the implementation_refs below will grow then.
     entity_ids: [moment]
     expression: "moments computed via Pébay (2008) update rules only"
-    rationale: "D006 selects Pébay; rejects sum-of-powers."
-    status: spec
+    rationale: >
+      D006 selects Pébay; rejects sum-of-powers. k=2 shipped 2026-04-23
+      as the textbook-verifiable foundation before extending to k=4.
+    implementation_refs:
+      - "src/pebay.h:iomoments_summary_update"
+      - "src/pebay.h:iomoments_summary_merge"
+    verification_refs:
+      - "tests/c/test_pebay.c:test_tiny_stream"
+      - "tests/c/test_pebay.c:test_wikipedia_fixture"
+      - "tests/c/test_pebay.c:test_merge_matches_single_stream"
+      - "tests/c/test_pebay.c:test_self_merge_is_aliasing_safe"
+      - "tests/test_pebay_ref.py::test_pebay_c_driver_passes"
+    status: tested
 
   - name: verdicts_are_first_class_output
     description: >
