@@ -345,16 +345,27 @@ domain_constraints:
       attach points; the kernel does not save/restore FP registers
       per-invocation for those contexts. src/pebay.h (double-based)
       stays for userspace + testing; the BPF path uses a separate
-      fixed-point header src/pebay_bpf.h (pending) whose results
-      match the userspace reference on integer-valued streams
-      within a documented tolerance.
+      fixed-point header src/pebay_bpf.h (Q32.32 m1 + int64 ns² m2
+      at k=2, Welford-approximate) whose results match the userspace
+      reference on integer-valued streams within a documented
+      tolerance (~1e-4 on μs-scale data, worse on pathological
+      tiny-integer fixtures per the integer-ns truncation floor).
     entity_ids: [moment, probe]
     rationale: >
       D011 — surfaced by the pre-commit Gemini review of src/pebay.h
-      on 2026-04-23 and captured as an architectural commitment on
-      2026-04-24. Scale choice deferred to first-use per D021
-      draft-first; see OpenQuestion bpf_fixedpoint_scale_choice.
-    status: spec
+      on 2026-04-23, captured as architectural commitment 2026-04-24.
+      Scale decided at first-use 2026-04-24 (Phase 2 of D011); see
+      D011's addendum for the Q32.32 m1 + int64 m2 choice and the
+      BPF-verifier constraints that drove it (no __multi3, no signed
+      division, __int128 rejected).
+    implementation_refs:
+      - "src/pebay_bpf.h:iomoments_summary_bpf_update"
+      - "src/pebay_bpf.h:iomoments_summary_bpf_merge"
+    verification_refs:
+      - "tests/c/test_pebay_bpf.c:test_integer_fixture_matches_within_tolerance"
+      - "tests/c/test_pebay_bpf.c:test_microsecond_sequence_agrees_within_tolerance"
+      - "tests/c/test_pebay_bpf.c:test_merge_matches_single_stream"
+    status: tested
 
   - name: bpf_programs_tested_in_vm_not_host
     description: >

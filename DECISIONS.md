@@ -717,6 +717,63 @@ pressure-test the scale choice. Task #34 tracks the
 implementation; ontology OpenQuestion
 `bpf_fixedpoint_scale_choice` tracks the open math question.
 
+**Phase 2 addendum (2026-04-24):** scale decided under first-use
+pressure.
+
+Final scale choice:
+- **m1 (running mean):** `int64_t` in **Q32.32 signed ns**. Integer
+  part covers ±2.1 s, fractional part ~2.3e-10 ns. Sufficient for
+  realistic I/O latencies; integer-range blowups (multi-second
+  stalls) are a diagnostic signal themselves.
+- **m2 (sum of squared deviations):** `int64_t` in **raw ns² (Q0.0)**.
+  Overflow at ~9.2e18 ns² (N·σ² bound); documented as a snapshot-
+  and-reset requirement in the userspace reporting loop.
+
+Why not the richer candidates (int128 accumulation, rolling
+rescale, periodic spill): the BPF target at clang `-target bpf`
+rejects three things needed for richer math:
+1. `__multi3` — 128-bit multiply compiler builtin. Blocks `__int128
+   * __int128` entirely.
+2. `__divti3` — 128-bit division. Blocks `__int128 / uint64_t`
+   (weighted mean form).
+3. Signed `/` on 64-bit integers — the verifier requires unsigned
+   division. Worked around via `iomoments_bpf_signed_div` (sign-
+   split into unsigned div + sign restore).
+
+int128 math is emulatable manually (four 32×32→64 products, explicit
+carry propagation) but that's substantially more code + verifier
+pressure than the beta scope justifies. The int64-only approximate
+form is the draft-first shape; a precision-tightening follow-up can
+add manual-128-bit-math when a real workload hits the floor.
+
+Precision floor vs `pebay.h` (double reference):
+- **Mean:** agrees to ~1 Q32.32 ULP (2.3e-10 ns) on μs-scale data.
+  On merge, degrades to ~0.5 ns absolute because the weighted-mean
+  formula goes through integer-ns arithmetic to stay under int64
+  overflow. Acceptable for all realistic iomoments usage.
+- **Variance:** ~2.6e-5 relative on μs-scale 1000-sample streams.
+  ~19% relative on pathological tiny-integer fixtures like the
+  Wikipedia [2,4,4,4,5,5,7,9] where true σ is near the 1 ns
+  precision floor.
+
+Matrix-sweep acceptance (2026-04-24): `iomoments.bpf.c` including
+`pebay_bpf.h` compiles under clang `-target bpf -O2` and loads via
+`bpftool prog load` inside all four vmtest guest kernels (5.15 /
+6.1 / 6.6 / 6.12 fedora38). Each kernel's verifier accepts the
+fixed-point math; BTF info loads successfully (libbpf's "Error
+loading .BTF" is a harmless kernel-older-than-my-clang warning on
+5.15 specifically, marked optional/ignorable by libbpf itself).
+
+Follow-up candidates tracked for when real workloads need them:
+- Manual 128-bit accumulator on m2 for sub-ns² precision on
+  tiny-integer fixtures. Would tighten Wikipedia-fixture variance
+  from 3.25 to 4.00.
+- Q48.16 m1 instead of Q32.32 if iomoments ever needs to track
+  multi-second latencies as first-class signals rather than
+  verdict-red outliers.
+- `PerformanceConstraint` entry binding `iomoments_summary_bpf_update`
+  cycles-per-sample once the first perf measurement lands.
+
 ## 2026-04-24
 
 ### D012: BPF load / verify / run tests in a VM, not on the host kernel

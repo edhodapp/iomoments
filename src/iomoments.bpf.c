@@ -33,6 +33,8 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
+#include "pebay_bpf.h"
+
 /*
  * The kernel's BPF loader identifies the program's license by reading
  * the contents of the ELF `license` section (placed here via the SEC
@@ -47,6 +49,16 @@
 char _license[] SEC("license") = "GPL";
 
 /*
+ * Dummy per-CPU-ish summary so pebay_bpf.h's inline functions end up
+ * in the BPF ELF and get verified by the kernel. The real attach
+ * point + map-backed summary lands in the next commit; this just
+ * proves the fixed-point header compiles and loads under -target bpf.
+ */
+/* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
+static struct iomoments_summary_bpf _iomoments_compile_check =
+	IOMOMENTS_SUMMARY_BPF_ZERO;
+
+/*
  * The BPF loader finds this function by its ELF section
  * ("raw_tracepoint/sys_enter"), not by a C-level caller. cppcheck's
  * static view sees no C reference and its whole-program
@@ -58,5 +70,10 @@ SEC("raw_tracepoint/sys_enter")
 int iomoments_noop(void *ctx)
 {
 	(void)ctx;
+	/* Exercise pebay_bpf.h so the fixed-point update function is
+	 * emitted into the BPF object and faces the verifier. Sample
+	 * value 1 is arbitrary; we're proving the toolchain + verifier
+	 * accept the math, not producing useful measurements yet. */
+	iomoments_summary_bpf_update(&_iomoments_compile_check, 1);
 	return 0;
 }
