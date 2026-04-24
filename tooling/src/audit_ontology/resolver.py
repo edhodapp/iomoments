@@ -63,12 +63,12 @@ _C_PATTERNS = (
                r"[A-Za-z_][\w\s\*]*\s+{name}\s*\("),
     re.compile(r"^\s*{name}\s*\("),  # macro-like invocations
     re.compile(r"^\s*{name}\s*="),
-    # Note: no SEC("...") regex here. libbpf's `SEC(...)` macro sits
-    # on its own line above the function header; the generic C
-    # function-definition pattern above (with or without `int`/
-    # `static int`) catches the following `int probe_fn(...)` line
-    # just fine. A single-line SEC-plus-signature regex was dead
-    # code masked by this pattern — removed.
+    # libbpf BPF_PROG / BPF_KPROBE wrapper macros expand to a
+    # function whose C-level name ends up inside the macro's
+    # argument list: `int BPF_PROG(my_func, ...)`. Match the name
+    # as the first arg of a macro call (comma or closing paren
+    # after, whitespace tolerated).
+    re.compile(r"\bBPF_(?:PROG|KPROBE|KRETPROBE|TP)\s*\(\s*{name}\s*[,)]"),
 )
 
 _SHELL_PATTERNS = (

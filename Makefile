@@ -50,9 +50,16 @@ CFLAGS_LINT_CLANG := $(CFLAGS_LINT) -Wthread-safety
 # -std=gnu11 (not c11) because bpf_helpers.h uses GNU `asm volatile`
 # extensions to nudge the verifier on certain helper calls; -std=c11
 # rejects those as "undeclared identifier 'asm'".
+# -Wno-language-extension-token: libbpf's BPF_PROG macro uses
+# `typeof(name(0))` to derive return type; -Wpedantic flags typeof
+# as a GNU extension. We accept it for BPF code because the macro is
+# the idiomatic fentry/fexit interface.
+# -Wno-unused-parameter: BPF_PROG generates a wrapper with an unused
+# `ctx` arg that handlers never touch.
 CFLAGS_LINT_BPF := -Wall -Wextra -Wpedantic -Werror -Wshadow \
                    -Wdouble-promotion -Wformat=2 -Wcast-align \
                    -Wconversion -Wmissing-field-initializers -std=gnu11 \
+                   -Wno-language-extension-token -Wno-unused-parameter \
                    -target bpf -D__TARGET_ARCH_x86 -O2 \
                    -I/usr/include/x86_64-linux-gnu
 

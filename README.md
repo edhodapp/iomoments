@@ -81,13 +81,13 @@ repository contains:
   signed-ns running mean + int64 ns² sum-of-squared-deviations.
   Round-trip-tested against `pebay.h` with documented tolerance
   (~2.6e-5 relative on μs-scale streams).
-- **`src/iomoments.bpf.c`** — BPF program that attaches to a
-  tracepoint, updates a per-CPU running summary via
-  `pebay_bpf.h`, exposes it through `BPF_MAP_TYPE_PERCPU_ARRAY`
-  for userspace aggregation. Current attach point is a
-  placeholder on `raw_tracepoint/sys_enter`; the block-layer
-  `block_rq_issue → block_rq_complete` latency pairing per D007
-  lands in a follow-up.
+- **`src/iomoments.bpf.c`** — BPF program attached via fentry
+  on `blk_mq_start_request` (issue) and `blk_mq_end_request`
+  (complete). Start timestamps are stored in a BPF hash map
+  keyed by `struct request *`; on complete, latency is computed
+  as `end_ts - start_ts` and fed into a per-CPU running
+  summary via `pebay_bpf.h`. This is real I/O-latency
+  measurement, verifier-accepted across the full kernel matrix.
 - **`tooling/src/iomoments_ontology/`** — Pydantic-typed
   formal-requirements DAG forked from python_agent. 18 ontology
   entries, all refs resolve against the working tree, audit gate
@@ -104,8 +104,6 @@ repository contains:
 
 ### Still to land before first beta trial
 
-- Real block-layer attach (`tracepoint/block/block_rq_issue` +
-  `block_rq_complete` with HASH-map-keyed timestamp pairing).
 - Userspace loader (`src/iomoments.c`): libbpf, per-CPU map
   readout, `pebay.h` parallel-merge, first reporting output.
 - First diagnostic signal implementation (Hill tail-index

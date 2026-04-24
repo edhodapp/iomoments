@@ -333,7 +333,8 @@ domain_constraints:
       port, DTrace are OUT of scope. Minimum kernel 5.15 for CO-RE.
     rationale: "D001 platform decision."
     implementation_refs:
-      - "src/iomoments.bpf.c:iomoments_record_event"
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
     verification_refs:
       - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
     status: tested
