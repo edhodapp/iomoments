@@ -61,12 +61,17 @@ jobs:
         # clang + libbpf-dev + bpftool + linux-libc-dev for BPF compile +
         # static BTF dump (test_bpf_verify_passes). No in-kernel load
         # happens on CI runners — that's vmtest territory per D012.
+        # bpftool ships via linux-tools-common (the /usr/sbin/bpftool
+        # shim) + linux-tools-generic (the versioned binary the shim
+        # dispatches to). Ubuntu 24.04 has no standalone `bpftool`
+        # package — it's a virtual-package alias.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang \
             libbpf-dev \
-            bpftool \
+            linux-tools-common \
+            linux-tools-generic \
             linux-libc-dev
 
       - name: Build + run C test suite
@@ -129,7 +134,12 @@ jobs:
         run: make lint-c
 
       - name: Install libbpf for BPF compile
-        run: sudo apt-get install -y libbpf-dev bpftool linux-libc-dev
+        run: |
+          sudo apt-get install -y \
+            libbpf-dev \
+            linux-tools-common \
+            linux-tools-generic \
+            linux-libc-dev
 
       - name: bpf-verify (static BTF inspection)
         # Compiles src/*.bpf.c and runs bpftool btf dump on the outputs.
