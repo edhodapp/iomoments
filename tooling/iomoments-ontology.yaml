@@ -331,10 +331,15 @@ domain_constraints:
     description: >
       iomoments is a Linux eBPF tool. BSD classic BPF, FreeBSD eBPF
       port, DTrace are OUT of scope. Minimum kernel 5.15 for CO-RE.
+      End-to-end proven 2026-04-24: the userspace binary loads the
+      BPF object, attaches the fentry programs, reads per-CPU
+      summaries, merges via pebay.h, prints a report. Runs cleanly
+      inside vmtest on all four matrix kernels.
     rationale: "D001 platform decision."
     implementation_refs:
       - "src/iomoments.bpf.c:iomoments_rq_issue"
       - "src/iomoments.bpf.c:iomoments_rq_complete"
+      - "src/iomoments.c:main"
     verification_refs:
       - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
     status: tested

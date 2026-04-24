@@ -81,7 +81,7 @@ CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 .PHONY: help venv install-hooks test test-c \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
         lint-c-scanbuild fmt-check bpf-compile bpf-verify bpf-test-vm \
-        bpf-test-vm-matrix \
+        bpf-test-vm-matrix iomoments-build \
         build-ontology gate-ontology \
         clean gate-local distclean
 
@@ -111,6 +111,7 @@ help:
 	@echo "  bpf-verify     Static bpftool BTF inspection on the .bpf.o (no kernel load)."
 	@echo "  bpf-test-vm    Load + run BPF in a VM via vmtest (D012; needs custom kernel)."
 	@echo "  bpf-test-vm-matrix  Sweep every ~/kernel-images/vmlinuz-v* kernel."
+	@echo "  iomoments-build Compile the userspace iomoments binary."
 	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
 	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
 	@echo "  gate-local     Full pre-push check: shellcheck + pytest + lints + ontology."
@@ -273,6 +274,16 @@ $(BUILD_DIR)/%.bpf.o: src/%.bpf.c | $(BUILD_DIR)
 	$(CC_CLANG) $(CFLAGS_LINT_BPF) -g -c $< -o $@
 
 bpf-compile: $(BPF_OBJS)
+
+# ---------------------------------------------------------------------------
+# Userspace iomoments binary — links libbpf + libelf + libz. Depends on
+# the BPF object being compiled (the binary reads build/iomoments.bpf.o
+# at load time via libbpf).
+# ---------------------------------------------------------------------------
+$(BUILD_DIR)/iomoments: src/iomoments.c $(C_HEADERS) $(BPF_OBJS) | $(BUILD_DIR)
+	$(CC_CLANG) $(CFLAGS_LINT_CLANG) -o $@ $< -lbpf -lelf -lz -lm
+
+iomoments-build: $(BUILD_DIR)/iomoments
 
 # ---------------------------------------------------------------------------
 # bpf-verify — static BTF inspection via bpftool. Does NOT load into the

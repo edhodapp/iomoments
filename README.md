@@ -102,10 +102,25 @@ repository contains:
   `make bpf-test-vm-matrix`. D012 guarantees iomoments never
   loads BPF on the host kernel.
 
+- **`src/iomoments.c`** — userspace loader. Opens + loads
+  `build/iomoments.bpf.o` via libbpf, attaches both fentry
+  programs, sleeps for `--duration` seconds, reads the per-CPU
+  summary map, merges CPUs' summaries via `pebay.h`'s
+  parallel-combine rule, prints mean / variance / stddev.
+
+### Running iomoments
+
+```
+make iomoments-build
+sudo ./build/iomoments --duration=10
+```
+
+End-to-end proven inside vmtest on all four matrix kernels
+(5.15 / 6.1 / 6.6 / 6.12) as of 2026-04-24. Requires CAP_BPF +
+CAP_PERFMON (or root) to load the BPF program.
+
 ### Still to land before first beta trial
 
-- Userspace loader (`src/iomoments.c`): libbpf, per-CPU map
-  readout, `pebay.h` parallel-merge, first reporting output.
 - First diagnostic signal implementation (Hill tail-index
   estimator per D007) and the Green/Yellow/Amber/Red verdict
   emission.

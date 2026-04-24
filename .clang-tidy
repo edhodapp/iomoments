@@ -31,7 +31,8 @@ Checks: >
   -cert-dcl03-c,
   -cert-dcl37-c,
   -cert-dcl51-cpp,
-  -cert-err33-c
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 
 # Rationale for each disable (keep in sync with Checks: list above):
 #
@@ -85,6 +86,15 @@ Checks: >
 #   helpers frequently return void or have non-error returns
 #   (bpf_printk's return we explicitly don't care about). Revisit
 #   on userland code where the I/O path does care about errno.
+#
+# -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#   Check fires on every fprintf/printf/snprintf call urging the
+#   caller to switch to the C11 Annex K `_s` variants (fprintf_s,
+#   snprintf_s, etc.). glibc explicitly refuses to implement Annex K;
+#   the "safe" variants aren't available on iomoments' target
+#   platforms. Every printf-family call in userspace trips this.
+#   Revisit if iomoments ever ships on a platform where Annex K
+#   is actually present AND correct.
 
 CheckOptions:
   # Pébay / moment-update naming follows the Sandia SAND2008-6212
