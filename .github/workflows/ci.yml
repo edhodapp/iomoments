@@ -61,17 +61,17 @@ jobs:
         # clang + libbpf-dev + bpftool + linux-libc-dev for BPF compile +
         # static BTF dump (test_bpf_verify_passes). No in-kernel load
         # happens on CI runners — that's vmtest territory per D012.
-        # bpftool ships via linux-tools-common (the /usr/sbin/bpftool
-        # shim) + linux-tools-generic (the versioned binary the shim
-        # dispatches to). Ubuntu 24.04 has no standalone `bpftool`
-        # package — it's a virtual-package alias.
+        # GitHub Azure runners run an azure-specific kernel, so
+        # `linux-tools-generic` won't satisfy the /usr/sbin/bpftool
+        # shim. Use linux-tools-$(uname -r) to pick up the exact
+        # versioned tools matching the runner's kernel.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang \
             libbpf-dev \
             linux-tools-common \
-            linux-tools-generic \
+            "linux-tools-$(uname -r)" \
             linux-libc-dev
 
       - name: Build + run C test suite
@@ -109,10 +109,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install C toolchain
-        # gcc + clang 18 + clang-tidy + clang-format + cppcheck + scan-build.
-        # scan-build is part of clang-tools-18 on Noble. BPF verifier load
-        # (bpftool) not installed here — kernel-in-a-box job lands later.
+      - name: Install C toolchain + libbpf
+        # gcc + clang 18 + clang-tidy + clang-format + cppcheck +
+        # scan-build (via clang-tools-18). libbpf-dev added so
+        # `make lint-c` compile-as-lint of src/*.bpf.c finds
+        # bpf_helpers.h. linux-libc-dev so <asm/types.h> resolves.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -121,7 +122,9 @@ jobs:
             clang-tidy-18 \
             clang-format-18 \
             clang-tools-18 \
-            cppcheck
+            cppcheck \
+            libbpf-dev \
+            linux-libc-dev
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
           sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format
@@ -133,13 +136,14 @@ jobs:
       - name: lint-c (four engines)
         run: make lint-c
 
-      - name: Install libbpf for BPF compile
+      - name: Install bpftool matching runner kernel
+        # linux-tools-$(uname -r) pulls in the versioned bpftool the
+        # /usr/sbin/bpftool shim dispatches to. On GitHub Azure
+        # runners that resolves to linux-tools-<ver>-azure.
         run: |
           sudo apt-get install -y \
-            libbpf-dev \
             linux-tools-common \
-            linux-tools-generic \
-            linux-libc-dev
+            "linux-tools-$(uname -r)"
 
       - name: bpf-verify (static BTF inspection)
         # Compiles src/*.bpf.c and runs bpftool btf dump on the outputs.
