@@ -81,6 +81,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+#include "iomoments_level2.h"
 #include "pebay.h"
 #include "pebay_bpf.h"
 
@@ -142,18 +143,6 @@ static void bpf_summary_to_ref(const struct iomoments_summary_bpf *bpf,
 	ref->m3 = s128_to_double(bpf->m3);
 	ref->m4 = s128_to_double(bpf->m4);
 }
-
-/*
- * One windowed snapshot. `end_ts_ns` is the CLOCK_MONOTONIC time at
- * which userspace finished draining the per-CPU map for this window;
- * it's the monotonic timestamp the Level-2 analysis indexes by.
- * `summary` is the merge of all per-CPU values that accumulated
- * since the previous drain.
- */
-struct iomoments_window {
-	uint64_t end_ts_ns;
-	struct iomoments_summary summary;
-};
 
 /*
  * Drain the per-CPU map into a single merged windowed summary, then
@@ -288,8 +277,36 @@ static size_t run_drain_loop(int map_fd, int ncpu, int duration, int window_ms,
  * γ₂ = n·M4/M2² - 3). Excess kurtosis is 0 for Gaussian, positive
  * for heavy-tailed/peaked distributions.
  */
+static void print_level2(const struct iomoments_level2_result *l2)
+{
+	printf("\n  --- Level 2 (D013): Nyquist + stationarity diagnostics"
+	       " ---\n");
+	if (l2->insufficient_data) {
+		printf("  insufficient windows for Level 2 (n=%zu < 4)\n",
+		       l2->n_windows);
+		return;
+	}
+	printf("  Var(windowed mean)     : %.3f ns²\n",
+	       l2->var_of_windowed_mean);
+	printf("  CLT-predicted variance : %.3f ns²"
+	       "  (σ²/n_per_window)\n",
+	       l2->clt_predicted_var);
+	printf("  variance ratio (V/V₀)  : %.3f"
+	       "  (1.0 = stationary Nyquist-met)\n",
+	       l2->variance_ratio);
+	printf("  Nyquist confidence     : %.3f  ∈ [0,1]\n",
+	       l2->nyquist_confidence);
+	printf("  autocorr(m1) at lags   : ");
+	for (size_t li = 0; li < IOMOMENTS_LEVEL2_LAGS; li++) {
+		printf("k=%zu: %+.3f%s", iomoments_level2_lag_values[li],
+		       l2->autocorr[li],
+		       (li + 1 < IOMOMENTS_LEVEL2_LAGS) ? "  " : "\n");
+	}
+}
+
 static void print_report(const struct iomoments_summary *global, int duration,
-			 int window_ms, size_t windows_captured)
+			 int window_ms, size_t windows_captured,
+			 const struct iomoments_level2_result *l2)
 {
 	printf("\niomoments report (duration %d s, window %d ms, D007"
 	       " verdict layer pending)\n",
@@ -317,6 +334,7 @@ static void print_report(const struct iomoments_summary *global, int duration,
 	printf("  stddev          : %.3f ns (%.3f μs)\n", stddev, stddev / 1e3);
 	printf("  skewness        : %+.4f\n", skew);
 	printf("  excess kurtosis : %+.4f\n", kurt);
+	print_level2(l2);
 }
 
 static void usage(const char *argv0)
@@ -482,7 +500,9 @@ int main(int argc, char **argv)
 	for (size_t i = 0; i < windows_count; i++) {
 		iomoments_summary_merge(&global, &window_ring[i].summary);
 	}
-	print_report(&global, duration, window_ms, windows_count);
+	struct iomoments_level2_result l2;
+	iomoments_level2_analyze(window_ring, windows_count, &global, &l2);
+	print_report(&global, duration, window_ms, windows_count, &l2);
 
 	free(window_ring);
 	bpf_object__close(obj);
