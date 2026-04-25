@@ -20,13 +20,14 @@
  *     blk_mq_end_request fentry).
  *   - Sleeps for --duration seconds (default 10).
  *   - Reads the iomoments_summary per-CPU map.
- *   - Merges per-CPU summaries into a single global summary.
- *   - Prints n, mean latency (ns), variance (ns²), stddev (ns).
+ *   - Merges per-CPU summaries into a single global summary via
+ *     pebay.h's k=4 parallel-combine rule.
+ *   - Prints n, mean latency (ns), variance (ns²), stddev (ns),
+ *     skewness, excess kurtosis.
  *
  * NOT yet in scope (follow-up):
  *
  *   - Diagnostic battery + Green/Yellow/Amber/Red verdict (D007).
- *   - Higher moments (M3 skewness, M4 kurtosis).
  *   - Repeated sampling / reporting windows.
  *   - Device / workload-class segmentation.
  */
@@ -89,7 +90,8 @@ static int libbpf_print_quiet(enum libbpf_print_level level, const char *fmt,
 /*
  * Convert a single CPU's fixed-point summary into the double-precision
  * shape that pebay.h's merge expects. m1 comes from the Q32.32 readout;
- * m2 is a plain cast (int64 ns² → double).
+ * m2 is a plain cast (int64 ns² → double); m3/m4 come from the s128
+ * readout helper that handles two's-complement → double cleanly.
  */
 static void bpf_summary_to_ref(const struct iomoments_summary_bpf *bpf,
 			       struct iomoments_summary *ref)
@@ -97,6 +99,8 @@ static void bpf_summary_to_ref(const struct iomoments_summary_bpf *bpf,
 	ref->n = bpf->n;
 	ref->m1 = iomoments_summary_bpf_mean_ns(bpf);
 	ref->m2 = (double)bpf->m2;
+	ref->m3 = s128_to_double(bpf->m3);
+	ref->m4 = s128_to_double(bpf->m4);
 }
 
 /*
@@ -133,7 +137,10 @@ static int merge_percpu_summaries(int map_fd, int ncpu,
 
 /*
  * Print the user-facing report. Units: ns everywhere. Variance is
- * the population variance (σ², m2/n), per D006.
+ * the population variance (σ², m2/n), per D006. Skewness and excess
+ * kurtosis are dimensionless population moments (γ₁ = √n·M3/M2^1.5,
+ * γ₂ = n·M4/M2² - 3). Excess kurtosis is 0 for Gaussian, positive
+ * for heavy-tailed/peaked distributions.
  */
 static void print_report(const struct iomoments_summary *global, int duration)
 {
@@ -149,10 +156,14 @@ static void print_report(const struct iomoments_summary *global, int duration)
 	double mean = iomoments_summary_mean(global);
 	double variance = iomoments_summary_variance(global);
 	double stddev = sqrt(variance);
+	double skew = iomoments_summary_skewness(global);
+	double kurt = iomoments_summary_excess_kurtosis(global);
 	printf("  samples         : %lu\n", global->n);
 	printf("  mean latency    : %.3f ns (%.3f μs)\n", mean, mean / 1e3);
 	printf("  variance        : %.3f ns²\n", variance);
 	printf("  stddev          : %.3f ns (%.3f μs)\n", stddev, stddev / 1e3);
+	printf("  skewness        : %+.4f\n", skew);
+	printf("  excess kurtosis : %+.4f\n", kurt);
 }
 
 static void usage(const char *argv0)
