@@ -24,35 +24,39 @@
  *
  *     iomoments [--duration=<secs>] [--window=<ms>] [--help]
  *
- * Periodic-drain (D013 Level 1 → Level 2 plumbing):
+ * Periodic-drain (D013 Level 1 → Level 2):
  *
  *   Every --window milliseconds, userspace reads the per-CPU map,
  *   merges into a single windowed iomoments_summary, resets the
  *   per-CPU accumulators to zero, and pushes the snapshot onto a
- *   time-indexed ring. The ring is the input to D013's Level 2
- *   moments-of-moments analysis (variance of windowed mean, lagged
- *   covariance, etc. — landing in a follow-up commit).
- *
- *   Today this commit: drain plumbing + ring storage. The shape
- *   report still aggregates across all windows (status quo
- *   behavior preserved). Level 2 analysis layers on top.
+ *   time-indexed ring. The ring is the input to Level 2 moments-
+ *   of-moments analysis (variance of windowed mean, lagged
+ *   covariance, Nyquist confidence) which feeds the D007
+ *   diagnostic-verdict layer.
  *
  * Today's scope:
  *
- *   - Loads build/iomoments.bpf.o via libbpf.
- *   - Attaches both BPF programs.
+ *   - Loads build/iomoments.bpf.o via libbpf and attaches both
+ *     BPF programs.
  *   - Periodically drains + resets the per-CPU map every
- *     --window ms.
- *   - Stores each drained snapshot in the windowed-summary ring.
+ *     --window ms; stores each snapshot in the windowed ring.
  *   - At end-of-duration, aggregates the ring via pebay.h's
- *     parallel-combine rule.
- *   - Prints n, mean, variance, stddev, skewness, excess kurtosis,
- *     plus the count of windows captured.
+ *     parallel-combine rule (Level 1 global moments).
+ *   - Runs iomoments_level2_analyze on the ring (D013): variance
+ *     of windowed mean vs CLT, autocorr at fixed lags, Nyquist
+ *     confidence.
+ *   - Runs iomoments_verdict_compute (D007): per-signal
+ *     Green/Yellow/Amber/Red emission with rationale, plus a
+ *     worst-of-all overall verdict.
+ *   - Prints the moments report, the Level 2 statistics, and the
+ *     verdict with per-signal breakdown.
  *
  * NOT yet in scope (follow-up):
  *
- *   - Level 2 moments-of-moments analysis (D013).
- *   - Diagnostic battery + Green/Yellow/Amber/Red verdict (D007).
+ *   - Carleman / Hankel determinacy signals (D007 named).
+ *   - Hill tail-index estimator (needs order-statistic reservoir).
+ *   - KS goodness-of-fit to log-normal (needs empirical CDF).
+ *   - Spectral flatness sweep (varies window length at runtime).
  *   - Device / workload-class segmentation.
  *
  * Drain race:
@@ -82,6 +86,7 @@
 #include <bpf/libbpf.h>
 
 #include "iomoments_level2.h"
+#include "iomoments_verdict.h"
 #include "pebay.h"
 #include "pebay_bpf.h"
 
@@ -277,6 +282,25 @@ static size_t run_drain_loop(int map_fd, int ncpu, int duration, int window_ms,
  * γ₂ = n·M4/M2² - 3). Excess kurtosis is 0 for Gaussian, positive
  * for heavy-tailed/peaked distributions.
  */
+static void print_verdict(const struct iomoments_verdict *v)
+{
+	printf("\n  --- D007 verdict: %s ---\n",
+	       iomoments_verdict_status_name(v->overall));
+	for (size_t i = 0; i < v->n_signals; i++) {
+		const struct iomoments_verdict_signal *s = &v->signals[i];
+		printf("    %-22s %-7s  %s\n", s->name,
+		       iomoments_verdict_status_name(s->status), s->rationale);
+	}
+	if (v->overall == IOMOMENTS_VERDICT_RED) {
+		printf("\n  Moment-based summary refused. Recommended"
+		       " alternatives:\n"
+		       "    DDSketch — quantile estimation with relative"
+		       " error guarantee\n"
+		       "    HDR Histogram — bounded-error full latency"
+		       " distribution\n");
+	}
+}
+
 static void print_level2(const struct iomoments_level2_result *l2)
 {
 	printf("\n  --- Level 2 (D013): Nyquist + stationarity diagnostics"
@@ -306,11 +330,11 @@ static void print_level2(const struct iomoments_level2_result *l2)
 
 static void print_report(const struct iomoments_summary *global, int duration,
 			 int window_ms, size_t windows_captured,
-			 const struct iomoments_level2_result *l2)
+			 const struct iomoments_level2_result *l2,
+			 const struct iomoments_verdict *verdict)
 {
-	printf("\niomoments report (duration %d s, window %d ms, D007"
-	       " verdict layer pending)\n",
-	       duration, window_ms);
+	printf("\niomoments report (duration %d s, window %d ms)\n", duration,
+	       window_ms);
 	printf("====================================================\n");
 	if (global->n == 0) {
 		printf("  samples: 0  (no block I/O observed; run against"
@@ -335,6 +359,7 @@ static void print_report(const struct iomoments_summary *global, int duration,
 	printf("  skewness        : %+.4f\n", skew);
 	printf("  excess kurtosis : %+.4f\n", kurt);
 	print_level2(l2);
+	print_verdict(verdict);
 }
 
 static void usage(const char *argv0)
@@ -502,7 +527,11 @@ int main(int argc, char **argv)
 	}
 	struct iomoments_level2_result l2;
 	iomoments_level2_analyze(window_ring, windows_count, &global, &l2);
-	print_report(&global, duration, window_ms, windows_count, &l2);
+	struct iomoments_verdict verdict;
+	iomoments_verdict_compute(&global, window_ring, windows_count, &l2,
+				  &verdict);
+	print_report(&global, duration, window_ms, windows_count, &l2,
+		     &verdict);
 
 	free(window_ring);
 	bpf_object__close(obj);
