@@ -2,39 +2,76 @@
 /* Copyright (C) 2026 Ed Hodapp <ed@hodapp.com> */
 
 /*
+ * _POSIX_C_SOURCE is needed to expose clock_gettime, clock_nanosleep,
+ * CLOCK_MONOTONIC, and TIMER_ABSTIME under the strict -std=c11 build
+ * flags. 200809L is the standard floor that includes all of these.
+ * The leading-underscore name is *required* by POSIX itself —
+ * clang-tidy's bugprone-reserved-identifier doesn't model the
+ * feature-test-macro convention.
+ */
+/* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
+#define _POSIX_C_SOURCE 200809L
+
+/*
  * iomoments userspace loader + aggregator.
  *
  * Runs the iomoments BPF program attached to blk_mq_start_request /
- * blk_mq_end_request via fentry, collects the per-CPU fixed-point
- * running summaries, merges them with pebay.h's double-precision
- * Pébay parallel-combine rule, and prints a shape report.
+ * blk_mq_end_request via fentry, periodically drains the per-CPU
+ * fixed-point summaries into a time series of windowed snapshots,
+ * and prints a shape report.
  *
  * Usage:
  *
- *     iomoments [--duration=<secs>] [--help]
+ *     iomoments [--duration=<secs>] [--window=<ms>] [--help]
  *
- * Today's scope (beta trial foundation):
+ * Periodic-drain (D013 Level 1 → Level 2 plumbing):
+ *
+ *   Every --window milliseconds, userspace reads the per-CPU map,
+ *   merges into a single windowed iomoments_summary, resets the
+ *   per-CPU accumulators to zero, and pushes the snapshot onto a
+ *   time-indexed ring. The ring is the input to D013's Level 2
+ *   moments-of-moments analysis (variance of windowed mean, lagged
+ *   covariance, etc. — landing in a follow-up commit).
+ *
+ *   Today this commit: drain plumbing + ring storage. The shape
+ *   report still aggregates across all windows (status quo
+ *   behavior preserved). Level 2 analysis layers on top.
+ *
+ * Today's scope:
  *
  *   - Loads build/iomoments.bpf.o via libbpf.
- *   - Attaches both BPF programs (blk_mq_start_request fentry,
- *     blk_mq_end_request fentry).
- *   - Sleeps for --duration seconds (default 10).
- *   - Reads the iomoments_summary per-CPU map.
- *   - Merges per-CPU summaries into a single global summary via
- *     pebay.h's k=4 parallel-combine rule.
- *   - Prints n, mean latency (ns), variance (ns²), stddev (ns),
- *     skewness, excess kurtosis.
+ *   - Attaches both BPF programs.
+ *   - Periodically drains + resets the per-CPU map every
+ *     --window ms.
+ *   - Stores each drained snapshot in the windowed-summary ring.
+ *   - At end-of-duration, aggregates the ring via pebay.h's
+ *     parallel-combine rule.
+ *   - Prints n, mean, variance, stddev, skewness, excess kurtosis,
+ *     plus the count of windows captured.
  *
  * NOT yet in scope (follow-up):
  *
+ *   - Level 2 moments-of-moments analysis (D013).
  *   - Diagnostic battery + Green/Yellow/Amber/Red verdict (D007).
- *   - Repeated sampling / reporting windows.
  *   - Device / workload-class segmentation.
+ *
+ * Drain race:
+ *
+ *   Between bpf_map_lookup_elem (read all CPUs) and the subsequent
+ *   bpf_map_update_elem (zero all CPUs), any per-CPU update that
+ *   fires on a third CPU lands in BPF's view of the map and is
+ *   then overwritten by our zeroing. Practical loss: a few samples
+ *   per drain at high IOPS. For Level 2 statistics this contributes
+ *   a small constant-jitter to per-window sample count, well below
+ *   the statistical noise of the moment estimators themselves.
+ *   Lossless drain via map-swap is a follow-up if measurement
+ *   shows it matters.
  */
 
 #include <errno.h>
 #include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +87,9 @@
 #define IOMOMENTS_BPF_OBJECT "build/iomoments.bpf.o"
 #define IOMOMENTS_MAP_NAME "iomoments_summary"
 #define IOMOMENTS_DEFAULT_DURATION 10
+#define IOMOMENTS_DEFAULT_WINDOW_MS 100
+#define IOMOMENTS_NSEC_PER_SEC 1000000000ULL
+#define IOMOMENTS_NSEC_PER_MSEC 1000000ULL
 
 static volatile sig_atomic_t stop_flag;
 
@@ -104,11 +144,26 @@ static void bpf_summary_to_ref(const struct iomoments_summary_bpf *bpf,
 }
 
 /*
- * Walk the per-CPU map, merge each CPU's summary into `global` using
- * pebay.h's parallel-combine rule.
+ * One windowed snapshot. `end_ts_ns` is the CLOCK_MONOTONIC time at
+ * which userspace finished draining the per-CPU map for this window;
+ * it's the monotonic timestamp the Level-2 analysis indexes by.
+ * `summary` is the merge of all per-CPU values that accumulated
+ * since the previous drain.
  */
-static int merge_percpu_summaries(int map_fd, int ncpu,
-				  struct iomoments_summary *global)
+struct iomoments_window {
+	uint64_t end_ts_ns;
+	struct iomoments_summary summary;
+};
+
+/*
+ * Drain the per-CPU map into a single merged windowed summary, then
+ * reset all per-CPU values to zero so the next window starts fresh.
+ * See top-of-file note about the lookup→reset race; loss is bounded
+ * to events that fire between the two map operations and is
+ * acceptable for Level 2 diagnostics.
+ */
+static int drain_and_reset_summaries(int map_fd, int ncpu,
+				     struct iomoments_summary *out)
 {
 	struct iomoments_summary_bpf *percpu_values =
 		calloc((size_t)ncpu, sizeof(*percpu_values));
@@ -125,14 +180,105 @@ static int merge_percpu_summaries(int map_fd, int ncpu,
 		return rc;
 	}
 
+	struct iomoments_summary merged = IOMOMENTS_SUMMARY_ZERO;
 	for (int cpu = 0; cpu < ncpu; cpu++) {
 		struct iomoments_summary cpu_ref = IOMOMENTS_SUMMARY_ZERO;
 		bpf_summary_to_ref(&percpu_values[cpu], &cpu_ref);
-		iomoments_summary_merge(global, &cpu_ref);
+		iomoments_summary_merge(&merged, &cpu_ref);
+	}
+	*out = merged;
+
+	memset(percpu_values, 0, (size_t)ncpu * sizeof(*percpu_values));
+	rc = bpf_map_update_elem(map_fd, &key, percpu_values, BPF_ANY);
+	free(percpu_values);
+	if (rc) {
+		fprintf(stderr, "bpf_map_update_elem (reset): %s\n",
+			strerror(errno));
+		return rc;
+	}
+	return 0;
+}
+
+/*
+ * Add a window snapshot to a CLOCK_MONOTONIC-indexed ts. Helper for
+ * the periodic-drain loop: takes a pre-computed wakeup timespec and
+ * packs it into the u64 ns field on the snapshot.
+ */
+static uint64_t timespec_to_ns(const struct timespec *ts)
+{
+	return (uint64_t)ts->tv_sec * IOMOMENTS_NSEC_PER_SEC +
+	       (uint64_t)ts->tv_nsec;
+}
+
+static void timespec_add_ns(struct timespec *ts, uint64_t ns)
+{
+	uint64_t total = timespec_to_ns(ts) + ns;
+	ts->tv_sec = (time_t)(total / IOMOMENTS_NSEC_PER_SEC);
+	ts->tv_nsec = (long)(total % IOMOMENTS_NSEC_PER_SEC);
+}
+
+/*
+ * Periodic-drain main loop. Wakes every window_ms via absolute
+ * clock_nanosleep, drains the per-CPU map into the next ring slot,
+ * stops at duration or signal. Returns the count of windows captured
+ * (including the final post-loop drain) or SIZE_MAX on hard error.
+ */
+static size_t run_drain_loop(int map_fd, int ncpu, int duration, int window_ms,
+			     struct iomoments_window *ring,
+			     size_t ring_capacity)
+{
+	uint64_t window_ns =
+		(uint64_t)window_ms * (uint64_t)IOMOMENTS_NSEC_PER_MSEC;
+	uint64_t total_ns =
+		(uint64_t)duration * (uint64_t)IOMOMENTS_NSEC_PER_SEC;
+
+	struct timespec start_ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+		perror("clock_gettime");
+		return SIZE_MAX;
+	}
+	struct timespec next_wakeup = start_ts;
+	uint64_t start_ns = timespec_to_ns(&start_ts);
+	size_t count = 0;
+
+	while (!stop_flag) {
+		timespec_add_ns(&next_wakeup, window_ns);
+		if (timespec_to_ns(&next_wakeup) - start_ns > total_ns) {
+			break;
+		}
+		int sleep_rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
+					       &next_wakeup, NULL);
+		if (sleep_rc == EINTR) {
+			break;
+		}
+		if (sleep_rc != 0) {
+			fprintf(stderr, "clock_nanosleep: %s\n",
+				strerror(sleep_rc));
+			break;
+		}
+		struct iomoments_summary win = IOMOMENTS_SUMMARY_ZERO;
+		if (drain_and_reset_summaries(map_fd, ncpu, &win) != 0) {
+			return SIZE_MAX;
+		}
+		if (count < ring_capacity) {
+			ring[count].end_ts_ns = timespec_to_ns(&next_wakeup);
+			ring[count].summary = win;
+			count += 1;
+		}
 	}
 
-	free(percpu_values);
-	return 0;
+	/* Final drain: capture samples since the last periodic drain. */
+	if (count < ring_capacity) {
+		struct iomoments_summary win = IOMOMENTS_SUMMARY_ZERO;
+		if (drain_and_reset_summaries(map_fd, ncpu, &win) == 0) {
+			struct timespec final_ts;
+			clock_gettime(CLOCK_MONOTONIC, &final_ts);
+			ring[count].end_ts_ns = timespec_to_ns(&final_ts);
+			ring[count].summary = win;
+			count += 1;
+		}
+	}
+	return count;
 }
 
 /*
@@ -142,11 +288,12 @@ static int merge_percpu_summaries(int map_fd, int ncpu,
  * γ₂ = n·M4/M2² - 3). Excess kurtosis is 0 for Gaussian, positive
  * for heavy-tailed/peaked distributions.
  */
-static void print_report(const struct iomoments_summary *global, int duration)
+static void print_report(const struct iomoments_summary *global, int duration,
+			 int window_ms, size_t windows_captured)
 {
-	printf("\niomoments report (duration %d s, D007 verdict layer"
-	       " pending)\n",
-	       duration);
+	printf("\niomoments report (duration %d s, window %d ms, D007"
+	       " verdict layer pending)\n",
+	       duration, window_ms);
 	printf("====================================================\n");
 	if (global->n == 0) {
 		printf("  samples: 0  (no block I/O observed; run against"
@@ -158,6 +305,12 @@ static void print_report(const struct iomoments_summary *global, int duration)
 	double stddev = sqrt(variance);
 	double skew = iomoments_summary_skewness(global);
 	double kurt = iomoments_summary_excess_kurtosis(global);
+	double samples_per_window =
+		windows_captured > 0
+			? (double)global->n / (double)windows_captured
+			: 0.0;
+	printf("  windows captured: %zu  (avg %.1f samples/window)\n",
+	       windows_captured, samples_per_window);
 	printf("  samples         : %lu\n", global->n);
 	printf("  mean latency    : %.3f ns (%.3f μs)\n", mean, mean / 1e3);
 	printf("  variance        : %.3f ns²\n", variance);
@@ -169,20 +322,28 @@ static void print_report(const struct iomoments_summary *global, int duration)
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"Usage: %s [--duration=<secs>] [--help]\n"
+		"Usage: %s [--duration=<secs>] [--window=<ms>] [--help]\n"
 		"\n"
 		"  --duration=<secs>  Observation window in seconds"
 		" (default %d).\n"
+		"  --window=<ms>      Per-CPU drain cadence in milliseconds"
+		" (default %d).\n"
+		"                     Each window becomes one sample in"
+		" D013's Level 2\n"
+		"                     time-series. Smaller windows give finer"
+		" Nyquist\n"
+		"                     resolution but more drain overhead.\n"
 		"  --help             Show this help.\n"
 		"\n"
 		"Requires CAP_BPF + CAP_PERFMON (or root) to load the"
 		" BPF program.\n",
-		argv0, IOMOMENTS_DEFAULT_DURATION);
+		argv0, IOMOMENTS_DEFAULT_DURATION, IOMOMENTS_DEFAULT_WINDOW_MS);
 }
 
-static int parse_args(int argc, char **argv, int *duration)
+static int parse_args(int argc, char **argv, int *duration, int *window_ms)
 {
 	*duration = IOMOMENTS_DEFAULT_DURATION;
+	*window_ms = IOMOMENTS_DEFAULT_WINDOW_MS;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 ||
 		    strcmp(argv[i], "-h") == 0) {
@@ -200,6 +361,17 @@ static int parse_args(int argc, char **argv, int *duration)
 			*duration = (int)v;
 			continue;
 		}
+		if (strncmp(argv[i], "--window=", 9) == 0) {
+			char *end;
+			long v = strtol(argv[i] + 9, &end, 10);
+			if (*end != '\0' || v <= 0 || v > 60000) {
+				fprintf(stderr, "iomoments: --window must be"
+						" 1..60000 milliseconds.\n");
+				return -1;
+			}
+			*window_ms = (int)v;
+			continue;
+		}
 		fprintf(stderr, "iomoments: unknown arg %s\n", argv[i]);
 		usage(argv[0]);
 		return -1;
@@ -210,7 +382,8 @@ static int parse_args(int argc, char **argv, int *duration)
 int main(int argc, char **argv)
 {
 	int duration;
-	int rc = parse_args(argc, argv, &duration);
+	int window_ms;
+	int rc = parse_args(argc, argv, &duration, &window_ms);
 	if (rc > 0) {
 		return 0;
 	}
@@ -273,20 +446,45 @@ int main(int argc, char **argv)
 		return 7;
 	}
 
-	fprintf(stderr, "iomoments: attached; sampling for %d s...\n",
-		duration);
-	for (int remaining = duration; remaining > 0 && !stop_flag;
-	     remaining--) {
-		sleep(1);
+	/*
+	 * Allocate the windowed-summary ring up-front. Capacity is
+	 * (duration_s · 1000 / window_ms) + a small margin for the
+	 * end-of-duration final drain. Bounded — no realloc.
+	 */
+	size_t ring_capacity = (size_t)duration * 1000 / (size_t)window_ms + 4;
+	struct iomoments_window *window_ring =
+		calloc(ring_capacity, sizeof(*window_ring));
+	if (!window_ring) {
+		perror("calloc window_ring");
+		bpf_object__close(obj);
+		return 7;
 	}
 
-	struct iomoments_summary global = IOMOMENTS_SUMMARY_ZERO;
-	rc = merge_percpu_summaries(map_fd, ncpu, &global);
-	if (rc) {
+	fprintf(stderr,
+		"iomoments: attached; sampling for %d s, %d ms drain"
+		" cadence (~%zu windows)...\n",
+		duration, window_ms, ring_capacity - 4);
+
+	size_t windows_count = run_drain_loop(map_fd, ncpu, duration, window_ms,
+					      window_ring, ring_capacity);
+	if (windows_count == SIZE_MAX) {
+		free(window_ring);
 		bpf_object__close(obj);
 		return 8;
 	}
-	print_report(&global, duration);
+
+	/*
+	 * Aggregate the ring into a single global summary via pebay.h's
+	 * parallel-combine rule — same shape report as before. Level 2
+	 * analysis (D013) reads window_ring directly in a follow-up.
+	 */
+	struct iomoments_summary global = IOMOMENTS_SUMMARY_ZERO;
+	for (size_t i = 0; i < windows_count; i++) {
+		iomoments_summary_merge(&global, &window_ring[i].summary);
+	}
+	print_report(&global, duration, window_ms, windows_count);
+
+	free(window_ring);
 	bpf_object__close(obj);
 	return 0;
 }
