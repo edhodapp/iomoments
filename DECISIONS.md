@@ -934,3 +934,110 @@ skeleton):
 with the `fedora38` preset; products live at
 `~/kernel-images/vmlinuz-v<version>`. `make bpf-test-vm-matrix`
 sweeps them.
+
+## 2026-04-25
+
+### D013: Nyquist diagnosis via moments-of-moments — the same primitive applied recursively
+
+**Decision.** iomoments' Nyquist / aliasing diagnostic is built from
+the same Pébay/Welford apparatus that computes the latency moments
+themselves, applied **recursively at two levels**. We do not bolt
+on FFT, a special-purpose inter-arrival accumulator, or a separate
+spectral subsystem. The temporal-coherence sidecar named in D007
+*is* a second-stage Pébay computation over per-window summaries.
+
+**The two-level architecture:**
+
+| Level | Domain | What it accumulates |
+|---|---|---|
+| **Level 1 (BPF)** | Latency samples within a *short window* of duration W | m1, m2, m3, m4 of latency over the window — exactly the existing `iomoments_summary_bpf` |
+| **Level 2 (userspace)** | Per-window summaries across a *time series of windows* | m1, m2, m3, m4 of each Level-1 moment across windows; lagged covariances of windowed means at varying lags |
+
+The BPF program is the same machinery for both halves of the
+project. The "second half" is structural: a userspace timer drains
+the per-CPU summaries every W, the drained summary becomes one
+Level-2 sample, and Level 2 runs Pébay over the resulting time
+series.
+
+**Why this is the right shape.** A stationary, Nyquist-met process
+has known Level-2 statistics under the Central Limit Theorem:
+variance of the windowed mean scales as σ²/n_per_window, lagged
+covariance of windowed means is ≈0 within statistical bounds,
+spectral content of the windowed-mean series is flat below the
+window-rate Nyquist limit. **Aliasing presents as departure from
+these CLT predictions.** Specifically:
+
+- **Variance-of-windowed-mean dipping at certain W.** Sweep W; plot
+  Var(windowed_mean | W). For stationary Nyquist-met data this is
+  smooth ~σ²/W. Hidden periodicity of period T_p makes the curve
+  *dip* when W is a multiple of T_p (the window straddles whole
+  periods, the windowed mean is insensitive to phase). The dip is
+  the aliasing fingerprint and recovers an estimate of T_p.
+- **Autocorrelation of windowed means at lag k.** ≈0 for stationary
+  Nyquist-met data; nonzero peaks at lag k indicate periodicity at
+  k·W.
+- **Spectral peaks at fold-back locations.** FFT of the
+  windowed-mean time series; peaks above the windowed-rate
+  1/(2W) are aliased and the closest fold-back candidate frequency
+  is the suspected hidden period.
+
+**Why moments suffice — the load-bearing observation.** Sample
+moments of the Level-1 outputs encode the same information FFT
+would, at lower cost and online-updatable form: Level-2 variance
+captures spectral energy across all frequencies, lagged covariances
+capture phase information at specific lags. We don't need FFT
+machinery to *detect* aliasing — we need it only to *attribute* a
+specific suspected frequency, and even that can be done by sweeping
+W rather than running FFT.
+
+**Implementation implications:**
+
+- BPF Level-1 stays as it is (post-cf81015 + the compile-time-S
+  knob). The summary is unchanged in shape; what changes is the
+  read cadence.
+- Userspace gains a periodic-drain loop: every W (default ~100ms,
+  configurable), drain all per-CPU `iomoments_summary_bpf` to a
+  ring of windowed snapshots; reset per-CPU accumulators.
+- Userspace gains a Level-2 stage: recursive Pébay over the
+  windowed m1's (giving mean-of-windowed-mean, var-of-windowed-
+  mean, etc.) plus a small set of lag-accumulators for lagged
+  covariance at chosen lags.
+- The verdict (D007's Green/Yellow/Amber/Red) is emitted by
+  comparing Level 2 statistics against CLT predictions. Departures
+  flag aliasing risk and produce the "amber/yellow" diagnostic
+  output with a suspected-period estimate.
+
+**Relationship to D007.** D007 explicitly named "variance of
+windowed moments as a function of window size (plateau = aliasing)"
+and "autocorrelation structure of the moment time series" as
+diagnostic signals. D013 names them as a *single architecture* —
+the same Pébay primitive at both levels — rather than as two
+distinct mechanisms. This refines D007's temporal-coherence
+sidecar into a concrete shape: it is recursive Pébay, not
+something separate.
+
+**Why this matters for the configurability discussion (cross-ref
+D011 + the compile-time-S knob).** With D013 in place, iomoments
+*tells the operator* whether their sample rate is sufficient for
+the underlying process bandwidth — they don't have to guess in
+advance. If Level 2 emits "amber: under-sampling suspected,
+suspected period ≈ T_p," the operator increases R (faster attach
+point, shorter window, different probe) and re-runs. Sample-rate
+selection becomes empirical, not a-priori.
+
+**Provenance.** This framing was developed in conversation with an
+AI assistant before becoming the central observation in
+`<https://hodapp.com/posts/honest-moments/>` ("moments of moments";
+variance-across-windows dipping at hidden periodicity; spectral
+peaks at fold-back; persistent autocorrelation of windowed means
+at characteristic lags). D013 records the architectural commitment
+that follows from those observations: **iomoments is built from
+one primitive applied at two levels, not two subsystems glued
+together.**
+
+**Cross-refs:**
+- D006 — Pébay update rules; the same primitive Level 2 reuses.
+- D007 — diagnostic-feasibility thesis; D013 is the shape of the
+  temporal-coherence sidecar D007 named.
+- D011 — BPF fixed-point arithmetic; Level 1 stays at the
+  post-cf81015 shape, Level 2 is double-precision userspace.
