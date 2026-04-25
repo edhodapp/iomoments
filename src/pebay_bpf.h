@@ -41,10 +41,16 @@
  * s128÷u64 via Knuth D); the BPF verifier accepts hand-rolled
  * 64-bit ops but rejects compiler __multi3/__divti3 libcalls.
  *
- * Why m2 stays s64: n·σ² stays under s64 max for σ ≤ 1ms at
- * n ≤ 9·10⁹, comfortably above realistic per-CPU summary lifetimes.
- * Documented limitation; userspace must drain summaries before
- * pathological long runs at high σ.
+ * Why m2 stays s64: m2 ≈ n·σ² must stay under s64 max ≈ 9.2·10¹⁸.
+ * Solving for safe n given typical I/O σ:
+ *   σ = 10μs   (NVMe-ish): n ≤ 9·10¹⁰ (90 billion samples)
+ *   σ = 100μs  (SATA SSD): n ≤ 9·10⁸  (~900 million samples)
+ *   σ = 1ms    (HDD)     : n ≤ 9·10⁶  (~9 million samples)
+ * For SSD-class workloads m2 has multi-hour lifetime headroom at
+ * realistic per-CPU IOPS; for HDD-class workloads userspace must
+ * drain summaries before saturation. Documented limitation —
+ * promoting m2 to s128 (matching m3/m4) is a follow-up if HDD
+ * workloads pressure this floor.
  *
  * -----------------------------------------------------------------
  * Precision vs pebay.h
