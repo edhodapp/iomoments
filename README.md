@@ -71,63 +71,109 @@ faster and characterize tail shape more directly.
 
 ## Status
 
-**Beta foundations are in place, pre-release.** As of 2026-04-24 the
-repository contains:
+**Beta-trial-ready as of 2026-04-25.** The arithmetic substrate, the
+periodic-drain plumbing, the Level 2 Nyquist diagnostic, and the
+D007 Green/Yellow/Amber/Red verdict layer are all live. End-to-end
+runs inside vmtest on every kernel in the 5.15 / 6.1 / 6.6 / 6.12
+matrix.
 
-- **`src/pebay.h`** — userspace-canonical Welford (Pébay k=2)
-  running summary in `double`. Property-tested against textbook
-  fixtures and scipy.
-- **`src/pebay_bpf.h`** — BPF-safe fixed-point counterpart. Q32.32
-  signed-ns running mean + int64 ns² sum-of-squared-deviations.
-  Round-trip-tested against `pebay.h` with documented tolerance
-  (~2.6e-5 relative on μs-scale streams).
-- **`src/iomoments.bpf.c`** — BPF program attached via fentry
-  on `blk_mq_start_request` (issue) and `blk_mq_end_request`
-  (complete). Start timestamps are stored in a BPF hash map
-  keyed by `struct request *`; on complete, latency is computed
-  as `end_ts - start_ts` and fed into a per-CPU running
-  summary via `pebay_bpf.h`. This is real I/O-latency
-  measurement, verifier-accepted across the full kernel matrix.
+**Arithmetic substrate (Level 1):**
+
+- **`src/pebay.h`** — userspace-canonical Pébay k=4 running summary
+  in `double`. Mean, variance, skewness, excess kurtosis from one
+  online update; parallel-combine merge for per-CPU aggregation.
+  Property-tested against textbook fixtures and scipy.
+- **`src/u128.h`** — hand-rolled 128-bit signed integer arithmetic
+  out of 64-bit primitives (BPF verifier rejects compiler-emitted
+  `__multi3` / `__divti3` libcalls). `s128_add/sub`,
+  `s64×s64→s128`, `s128_mul_u64/s64`, `s128_div_u64` (Knuth
+  Algorithm D / Hacker's Delight 9-3), `s128_to_double`.
+  Validated against `__int128` over hand-picked boundary cases +
+  2000-trial deterministic LCG sweeps per primitive.
+- **`src/pebay_bpf.h`** — BPF-safe fixed-point counterpart at k=4.
+  Q32.32 signed-ns running mean, int64 ns² m2, s128 m3 (ns³) and
+  s128 m4 (ns⁴). Round-trip-tested against `pebay.h` for mean,
+  variance, skewness, and excess kurtosis with documented
+  tolerances per fixture. m2 saturation at HDD-σ workloads is
+  documented; userspace periodic drain mitigates.
+- **`src/iomoments.bpf.c`** — BPF program attached via fentry on
+  `blk_mq_start_request` (issue) and `blk_mq_end_request`
+  (complete). Real I/O-latency measurement; verifier-accepted on
+  the full 5.15 / 6.1 / 6.6 / 6.12 matrix.
+
+**Periodic drain + Level 2 (D013):**
+
+- **`src/iomoments.c`** — userspace loader. Periodically drains
+  + resets the per-CPU map every `--window` ms (default 100ms),
+  pushes each windowed snapshot onto a time-indexed ring,
+  aggregates the ring into the global summary at end-of-duration.
+- **`src/iomoments_level2.h`** — D013 moments-of-moments analysis.
+  Takes the time series of windowed `iomoments_summary` snapshots
+  and computes variance of the windowed-mean stream, the
+  CLT-predicted variance under stationary Nyquist-met assumptions
+  (σ²/n_per_window), the variance ratio, the Nyquist-confidence
+  fingerprint `exp(-½·(log₂ ratio)²)`, and lag-{1,2,4,8}
+  autocorrelation of windowed means. Aliasing presents as variance
+  ratio < 1 (windowed means insensitive to phase); non-stationarity
+  presents as ratio > 1.
+- **`tests/c/test_level2.c`** — synthetic-window fixtures
+  (deterministic LCG-driven Box-Muller Gaussian) covering
+  stationary high-confidence, drifting-mean low-confidence, and
+  aliased-periodic dip cases.
+
+**D007 verdict layer:**
+
+- **`src/iomoments_verdict.h`** — six signal evaluators
+  (sample_count, variance_sanity, kurtosis_sanity,
+  nyquist_confidence, autocorr_residual, half_split_stability),
+  each emitting a Green/Yellow/Amber/Red status with a short
+  rationale string. Overall verdict is the worst-of-all. RED
+  refuses the moment-based summary and recommends DDSketch / HDR
+  Histogram as alternatives.
+- **`tests/c/test_verdict.c`** — 17 fixtures covering each signal
+  evaluator's threshold bands, the worst-of-all aggregation
+  monotonicity, and an end-to-end stationary-Gaussian → GREEN
+  scenario.
+
+**Test, build, gate:**
+
 - **`tooling/src/iomoments_ontology/`** — Pydantic-typed
-  formal-requirements DAG forked from python_agent. 18 ontology
-  entries, all refs resolve against the working tree, audit gate
-  fires on every push.
-- **`tooling/src/audit_ontology/`** — traceability audit tool
-  that cross-references every constraint's
-  `implementation_refs` / `verification_refs` against the
-  committed code. Wired into pre-push and CI.
+  formal-requirements DAG. Audit gate fires on every push.
+- **`tooling/src/audit_ontology/`** — cross-references every
+  constraint's `implementation_refs` / `verification_refs`
+  against the committed code. Pre-push + CI.
 - **kernel-matrix VM testing** — every push exercises
   `iomoments.bpf.o` against four vmtest-built guest kernels
   (5.15 / 6.1 / 6.6 / 6.12, fedora38 preset) via
   `make bpf-test-vm-matrix`. D012 guarantees iomoments never
   loads BPF on the host kernel.
 
-- **`src/iomoments.c`** — userspace loader. Opens + loads
-  `build/iomoments.bpf.o` via libbpf, attaches both fentry
-  programs, sleeps for `--duration` seconds, reads the per-CPU
-  summary map, merges CPUs' summaries via `pebay.h`'s
-  parallel-combine rule, prints mean / variance / stddev.
-
 ### Running iomoments
 
 ```
 make iomoments-build
-sudo ./build/iomoments --duration=10
+sudo ./build/iomoments --duration=10 --window=100
 ```
 
-End-to-end proven inside vmtest on all four matrix kernels
-(5.15 / 6.1 / 6.6 / 6.12) as of 2026-04-24. Requires CAP_BPF +
-CAP_PERFMON (or root) to load the BPF program.
+The report emits Level 1 moments, Level 2 Nyquist diagnostic, and
+the D007 verdict with per-signal breakdown.
 
-### Still to land before first beta trial
+### Still to land (post-beta)
 
-- First diagnostic signal implementation (Hill tail-index
-  estimator per D007) and the Green/Yellow/Amber/Red verdict
-  emission.
-- Higher-moment extension (M3, M4) in both `pebay.h` and
-  `pebay_bpf.h`.
+D007 names additional diagnostic signals not yet implemented:
 
-Design log: **`DECISIONS.md`** (D001–D012). CD-pipeline design
+- **Carleman partial sum** and **Hankel matrix conditioning** —
+  moment-determinacy conditions computed directly from m2/m3/m4.
+  No new infrastructure needed; layer on top of the existing
+  verdict evaluators.
+- **Hill tail-index estimator** — needs an order-statistic
+  reservoir (top-k samples) in BPF or via ringbuf.
+- **KS goodness-of-fit to log-normal** — needs an empirical CDF
+  (histogram or sample reservoir).
+- **Spectral flatness sweep** — sweeps window length at userspace
+  analysis time. Reuses the existing window ring; no BPF change.
+
+Design log: **`DECISIONS.md`** (D001–D013). CD-pipeline design
 lives in **`CD-PIPELINE-PROPOSAL.md`** (some sections superseded
 by D008/D009/D010/D012; supersession banners at the top point
 forward).
