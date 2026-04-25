@@ -211,6 +211,137 @@ IOMOMENTS_BPF_INLINE struct s128 s64_mul_s64(iomoments_s64 a, iomoments_s64 b)
 }
 
 /*
+ * Multiply s128 by an unsigned u64, truncating bits >= 128.
+ *
+ *   v · m = (v_hi · 2⁶⁴ + v_lo) · m
+ *         = v_hi · m · 2⁶⁴ + v_lo · m
+ *
+ * The v_lo · m product is the full 128 low bits; v_hi · m supplies
+ * up to 128 more bits, but only its low 64 land in our result's
+ * `hi` (its high 64 are bits >= 192, truncated).
+ *
+ * Sign: caller's `v` is signed. For positive v.hi the unsigned high
+ * half is just (u64)v.hi. For negative v, take magnitude via
+ * two's-complement negation, multiply, restore sign — same pattern
+ * as s64_mul_s64.
+ */
+IOMOMENTS_BPF_INLINE struct s128 s128_mul_u64(struct s128 v, iomoments_u64 m)
+{
+	int neg = (v.hi < 0);
+	iomoments_u64 mag_hi = (iomoments_u64)v.hi;
+	iomoments_u64 mag_lo = v.lo;
+	if (neg) {
+		mag_lo = ~v.lo + 1ULL;
+		/* cppcheck-suppress knownConditionTrueFalse */
+		iomoments_u64 carry = (mag_lo == 0) ? 1ULL : 0ULL;
+		mag_hi = ~(iomoments_u64)v.hi + carry;
+	}
+
+	/* Two u64 × u64 → u128 partials; assemble truncating to 128. */
+	iomoments_u64 lo_hi, lo_lo;
+	iomoments_u64 hi_hi_unused, hi_lo;
+	u64_mul_u64(mag_lo, m, &lo_hi, &lo_lo);
+	u64_mul_u64(mag_hi, m, &hi_hi_unused, &hi_lo);
+	(void)hi_hi_unused;
+	iomoments_u64 prod_lo = lo_lo;
+	iomoments_u64 prod_hi = lo_hi + hi_lo;
+
+	struct s128 r;
+	if (neg) {
+		iomoments_u64 neg_lo = ~prod_lo + 1ULL;
+		/* cppcheck-suppress knownConditionTrueFalse */
+		iomoments_u64 carry = (neg_lo == 0) ? 1ULL : 0ULL;
+		iomoments_u64 neg_hi = ~prod_hi + carry;
+		r.hi = (iomoments_s64)neg_hi;
+		r.lo = neg_lo;
+	} else {
+		r.hi = (iomoments_s64)prod_hi;
+		r.lo = prod_lo;
+	}
+	return r;
+}
+
+/*
+ * Divide s128 by a positive u64, returning s128 quotient.
+ *
+ * Standard shift-and-subtract long division: 128 iterations, each
+ * doing one bit-shift of remainder, one bit-shift of quotient, a
+ * compare, and a conditional subtract. Split into two 64-iteration
+ * loops over the high and low halves so all shifts are by
+ * compile-time-bounded amounts (verifier-friendly: BPF's bounded-
+ * loop analyzer accepts ≤ 8192 iterations).
+ *
+ * Caller contract: d != 0. Hot path divides by n (sample count),
+ * always ≥ 1 by construction.
+ *
+ * Sign: signed numerator, unsigned divisor. Take magnitude, divide
+ * unsigned, restore sign.
+ *
+ * Truncation: integer division rounds toward zero (consistent with
+ * C's signed-division semantics post-C99).
+ */
+IOMOMENTS_BPF_INLINE struct s128 s128_div_u64(struct s128 v, iomoments_u64 d)
+{
+	int neg = (v.hi < 0);
+	iomoments_u64 num_hi = (iomoments_u64)v.hi;
+	iomoments_u64 num_lo = v.lo;
+	if (neg) {
+		num_lo = ~v.lo + 1ULL;
+		/* cppcheck-suppress knownConditionTrueFalse */
+		iomoments_u64 carry = (num_lo == 0) ? 1ULL : 0ULL;
+		num_hi = ~(iomoments_u64)v.hi + carry;
+	}
+
+	iomoments_u64 q_hi = 0, q_lo = 0, r = 0;
+	/*
+	 * Long division loop. The conceptual remainder is 65 bits wide
+	 * (a u64 plus a possible bit-64 carry from the previous shift),
+	 * because (r < d) ≤ d-1 implies (r << 1) | bit ≤ 2d - 1, which
+	 * doesn't fit u64 when d > 2^63. Capture `r >> 63` BEFORE the
+	 * shift as the implicit bit-64; combine it with the post-shift
+	 * `r` for the compare. When r_top is set, the subtract is
+	 * unconditional and the natural u64 wrap of `r - d` produces
+	 * the correct (2^64 + r) - d remainder, which is < d when the
+	 * invariant holds (which it does: r_top can only be set when
+	 * d > 2^63, and the subtract restores r < d).
+	 */
+	for (int i = 63; i >= 0; i--) {
+		iomoments_u64 r_top = r >> 63;
+		r = (r << 1) | ((num_hi >> i) & 1ULL);
+		q_hi = (q_hi << 1) | (q_lo >> 63);
+		q_lo = q_lo << 1;
+		if (r_top != 0 || r >= d) {
+			r -= d;
+			q_lo |= 1ULL;
+		}
+	}
+	for (int i = 63; i >= 0; i--) {
+		iomoments_u64 r_top = r >> 63;
+		r = (r << 1) | ((num_lo >> i) & 1ULL);
+		q_hi = (q_hi << 1) | (q_lo >> 63);
+		q_lo = q_lo << 1;
+		if (r_top != 0 || r >= d) {
+			r -= d;
+			q_lo |= 1ULL;
+		}
+	}
+
+	struct s128 result;
+	if (neg) {
+		iomoments_u64 neg_lo = ~q_lo + 1ULL;
+		/* cppcheck-suppress knownConditionTrueFalse */
+		iomoments_u64 carry = (neg_lo == 0) ? 1ULL : 0ULL;
+		iomoments_u64 neg_hi = ~q_hi + carry;
+		result.hi = (iomoments_s64)neg_hi;
+		result.lo = neg_lo;
+	} else {
+		result.hi = (iomoments_s64)q_hi;
+		result.lo = q_lo;
+	}
+	return result;
+}
+
+/*
  * Userspace-only readouts. BPF targets reject floating-point
  * (the kernel doesn't save/restore FP registers across tracing
  * attach points), so these are excluded from the BPF compile.

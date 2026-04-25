@@ -365,6 +365,121 @@ static void test_s128_to_double(void)
 	}
 }
 
+/* --- s128_mul_u64 ----------------------------------------------------- */
+
+static void test_s128_mul_u64_boundaries(void)
+{
+	struct {
+		s128_ref v;
+		iomoments_u64 m;
+	} cases[] = {
+		{0, 0},
+		{1, 0},
+		{0, 0xDEADBEEFULL},
+		{1, 1},
+		{-1, 1},
+		{1, 0xFFFFFFFFFFFFFFFFULL},
+		{-1, 0xFFFFFFFFFFFFFFFFULL},
+		/* s64 magnitude × u64: result is well within s128. */
+		{(s128_ref)0x123456789ABCDEF0LL, 0x100ULL},
+		{-(s128_ref)0x123456789ABCDEF0LL, 0x100ULL},
+		/* Cross 64-bit boundary. */
+		{(s128_ref)((u128_ref)1 << 70), 4},
+		{-(s128_ref)((u128_ref)1 << 70), 4},
+	};
+	const size_t n = sizeof(cases) / sizeof(cases[0]);
+	for (size_t i = 0; i < n; i++) {
+		/* Reference: __int128 multiply, truncating to s128. */
+		s128_ref expected = cases[i].v * (s128_ref)cases[i].m;
+		struct s128 got =
+			s128_mul_u64(s128_from_ref(cases[i].v), cases[i].m);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_mul_u64 case %zu m=%llu got hi=%llx "
+				 "lo=%llx\n",
+				 i, (unsigned long long)cases[i].m,
+				 (unsigned long long)got.hi,
+				 (unsigned long long)got.lo);
+		}
+	}
+}
+
+static void test_s128_mul_u64_lcg_sweep(void)
+{
+	iomoments_u64 state = 0x5A5A5A5AA5A5A5A5ULL;
+	for (int trial = 0; trial < 2000; trial++) {
+		iomoments_u64 v_hi = lcg_next(&state);
+		iomoments_u64 v_lo = lcg_next(&state);
+		iomoments_u64 m = lcg_next(&state);
+		s128_ref v_ref = (s128_ref)(((u128_ref)v_hi << 64) | v_lo);
+		s128_ref expected = v_ref * (s128_ref)m;
+		struct s128 got = s128_mul_u64(s128_from_ref(v_ref), m);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_mul_u64 LCG trial %d\n", trial);
+			return;
+		}
+	}
+}
+
+/* --- s128_div_u64 ----------------------------------------------------- */
+
+static void test_s128_div_u64_boundaries(void)
+{
+	struct {
+		s128_ref v;
+		iomoments_u64 d;
+	} cases[] = {
+		{0, 1},
+		{1, 1},
+		{-1, 1},
+		{42, 7},
+		{-42, 7},
+		{43, 7},  /* truncates toward zero: 43/7 = 6 */
+		{-43, 7}, /* -43/7 = -6 (truncate toward zero, not -7) */
+		{(s128_ref)1000000000000LL, 1000000ULL},
+		{-(s128_ref)1000000000000LL, 1000000ULL},
+		/* Numerator straddles the 64-bit half boundary. */
+		{(s128_ref)((u128_ref)1 << 100), 7},
+		{-(s128_ref)((u128_ref)1 << 100), 7},
+		/* Numerator < divisor: quotient must be 0. */
+		{5, 100},
+		{-5, 100},
+		/* Divisor large; quotient small. */
+		{(s128_ref)((u128_ref)1 << 90), 0xFFFFFFFFFFFFFFFFULL},
+	};
+	const size_t n = sizeof(cases) / sizeof(cases[0]);
+	for (size_t i = 0; i < n; i++) {
+		s128_ref expected = cases[i].v / (s128_ref)cases[i].d;
+		struct s128 got =
+			s128_div_u64(s128_from_ref(cases[i].v), cases[i].d);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_div_u64 case %zu d=%llu got hi=%llx "
+				 "lo=%llx\n",
+				 i, (unsigned long long)cases[i].d,
+				 (unsigned long long)got.hi,
+				 (unsigned long long)got.lo);
+		}
+	}
+}
+
+static void test_s128_div_u64_lcg_sweep(void)
+{
+	iomoments_u64 state = 0xF00DBABECAFEFEEDULL;
+	for (int trial = 0; trial < 2000; trial++) {
+		iomoments_u64 v_hi = lcg_next(&state);
+		iomoments_u64 v_lo = lcg_next(&state);
+		iomoments_u64 d = lcg_next(&state);
+		if (d == 0)
+			d = 1; /* contract: d != 0 */
+		s128_ref v_ref = (s128_ref)(((u128_ref)v_hi << 64) | v_lo);
+		s128_ref expected = v_ref / (s128_ref)d;
+		struct s128 got = s128_div_u64(s128_from_ref(v_ref), d);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_div_u64 LCG trial %d\n", trial);
+			return;
+		}
+	}
+}
+
 int main(void)
 {
 	test_u64_mul_u64_boundaries();
@@ -376,6 +491,10 @@ int main(void)
 	test_s128_sub_lcg_sweep();
 	test_s128_from_s64();
 	test_s128_to_double();
+	test_s128_mul_u64_boundaries();
+	test_s128_mul_u64_lcg_sweep();
+	test_s128_div_u64_boundaries();
+	test_s128_div_u64_lcg_sweep();
 
 	if (failures > 0) {
 		fprintf(stderr, "\n%d assertion(s) failed.\n", failures);
