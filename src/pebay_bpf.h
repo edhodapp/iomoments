@@ -3,7 +3,8 @@
 
 /*
  * Pébay (2008) online moment update — BPF-safe fixed-point variant
- * at k=2 (Welford). Companion to src/pebay.h, which uses double.
+ * at k=4 (mean, variance, skewness, excess kurtosis). Companion to
+ * src/pebay.h, which uses double.
  *
  * Why two headers (D011): the BPF verifier rejects floating-point
  * instructions in tracing attach points; the kernel does not
@@ -19,70 +20,68 @@
  * pebay_bpf.h is an approximation pinned to not drift off it.
  *
  * -----------------------------------------------------------------
- * Scale choice (D011 Phase 2, decided 2026-04-24 at first-use):
+ * Storage (k=4):
  * -----------------------------------------------------------------
  *
- *   m1 — running mean
- *        iomoments_s64 in Q32.32 fixed-point ns.
- *        Integer part up to 2^31 ns (~2.1 s) — above realistic I/O
- *        latency except for catastrophic stalls (which are diagnostic
- *        signals themselves, handled separately).
- *        Fractional part: 32 bits ~= 2.3e-10 ns. More than enough
- *        headroom for the delta/n update to retain precision as n
- *        grows.
+ *   m1_fp  iomoments_s64 in Q32.32 fixed-point ns. Integer part up
+ *          to 2^31 ns (~2.1 s); fractional 2^-32 ns precision.
+ *   m2     iomoments_s64 in raw ns² (Q0.0). Sum of squared deviations.
+ *   m3     struct s128 in raw ns³.  Sum of cubed deviations.
+ *   m4     struct s128 in raw ns⁴.  Sum of fourth-power deviations.
  *
- *   m2 — running sum of squared deviations
- *        iomoments_s64 in raw ns² (Q0.0, no fractional bits).
- *        Update contribution per sample is roughly σ² ns². Over N
- *        samples, m2 grows to ~N·σ². Max int64 is ~9.2e18; that
- *        bounds N·σ² before overflow. For σ=1ms samples (σ²=1e12),
- *        overflow threshold N ≈ 9e6. For σ=10μs, N ≈ 9e10.
+ * Total footprint: 8 (n) + 8 (m1_fp) + 8 (m2) + 16 (m3) + 16 (m4)
+ * = 56 bytes per CPU. Within D009's 64-byte per_cpu_update_bytes
+ * budget.
  *
- *        Overflow is a documented limitation. Userspace's reporting
- *        loop must snapshot-and-reset each per-CPU summary before
- *        saturation. An int128-emulated m2 (two iomoments_u64 with carry
- *        propagation) is a follow-up if real usage pressures this.
+ * Why s128 for m3, m4: realistic workloads (n=10⁹ samples at
+ * σ=10μs) drive m3 ≈ n·γ·σ³ ≈ 10²¹ and m4 ≈ n·σ⁴ ≈ 10²⁵, both well
+ * over s64's 9.2·10¹⁸ ceiling. Per-sample products in the update
+ * also exceed s64 transiently. u128.h provides the multi-precision
+ * primitives (s128_add/sub, s64×s64→s128, s128×u64, s128×s64,
+ * s128÷u64 via Knuth D); the BPF verifier accepts hand-rolled
+ * 64-bit ops but rejects compiler __multi3/__divti3 libcalls.
  *
- *   x  — input sample (iomoments_u64 ns, directly from bpf_ktime_get_ns).
- *        No scaling on input; iomoments works at ns granularity.
+ * Why m2 stays s64: n·σ² stays under s64 max for σ ≤ 1ms at
+ * n ≤ 9·10⁹, comfortably above realistic per-CPU summary lifetimes.
+ * Documented limitation; userspace must drain summaries before
+ * pathological long runs at high σ.
  *
  * -----------------------------------------------------------------
  * Precision vs pebay.h
  * -----------------------------------------------------------------
  *
- * For integer-ns inputs, pebay_bpf's running mean agrees with
- * pebay's to within one Q32.32 fractional bit (~2.3e-10 ns) — well
- * below measurement precision.
+ * For integer-ns inputs:
+ *   - mean: Q32.32 / N agrees with pebay.h to ~1 ULP at low N,
+ *     converging to bit-exact for many samples.
+ *   - variance: integer-ns truncation in the Welford update
+ *     accumulates ≤ 1 ns² per sample. Negligible at σ >> 1 ns.
+ *   - skewness, excess kurtosis: each delta-product step truncates
+ *     to integer ns, so M3 and M4 lose sub-ns fractional
+ *     contributions per update. Relative error scales as
+ *     (1/σ)^k for the kth moment. At μs-scale σ the error is
+ *     ~1e-6 relative; at ns-scale σ (pathological textbook
+ *     fixtures) it's perceptible (~10% on M4).
  *
- * m2 agrees to within the integer-truncation error accumulated
- * during the delta_fp → delta_int downshift in the update. For N
- * samples that's bounded by N ns² in the worst case. variance =
- * m2/N, so relative precision scales as 1/σ² — very good for
- * distributions with σ >> 1 ns, converging to "iomoments
- * precision = measurement precision" at ns-integer inputs.
+ * The round-trip test pins this with documented tolerances per
+ * fixture.
  *
  * -----------------------------------------------------------------
- * Footprint
+ * Merge:
  * -----------------------------------------------------------------
  *
- * struct iomoments_summary_bpf = 24 bytes (n + m1_fp + m2). Fits
- * well under D009's 64-byte per_cpu_update_bytes budget at k=2.
- * M3/M4 extension will push this past 64; revisit the budget then.
+ * iomoments_summary_bpf_merge implements Pébay eq (3.2)-(3.5) at
+ * k=4 using the same multi-precision primitives. It is NOT called
+ * on the BPF hot path — production aggregation goes BPF →
+ * bpf_summary_to_ref → pebay.h merge in double. The BPF-side merge
+ * exists so that the round-trip test can verify the fixed-point
+ * parallel-combine rule against the canonical double-precision
+ * one.
  */
 
 #ifndef IOMOMENTS_PEBAY_BPF_H
 #define IOMOMENTS_PEBAY_BPF_H
 
-/*
- * Type aliases instead of <stdint.h>: BPF compile (clang -target bpf)
- * pulls <stdint.h> → <gnu/stubs.h> which expects the 32-bit multiarch
- * stubs (gnu/stubs-32.h) that aren't installed by default on Ubuntu
- * unless gcc-multilib is pulled in. Avoiding stdint.h here keeps
- * pebay_bpf.h standalone and BPF-host-agnostic. unsigned long long
- * and long long are 64-bit on every target iomoments ships to.
- */
-typedef unsigned long long iomoments_u64;
-typedef long long iomoments_s64;
+#include "u128.h"
 
 #ifndef IOMOMENTS_BPF_INLINE
 #if defined(__bpf__)
@@ -101,33 +100,20 @@ typedef long long iomoments_s64;
 
 #define IOMOMENTS_BPF_FRAC_BITS 32
 
-/*
- * m2 stored as int64 in raw ns² (Q0.0). Welford's ideal update
- * needs Q64.64 accumulation (Q32.32 * Q32.32 product) which exceeds
- * int64 and requires __int128 — but BPF targets reject __multi3
- * (128-bit multiply compiler builtin). Draft-first compromise: drop
- * the fractional-ns² contribution on each update by computing the
- * product at integer-ns resolution via `delta_fp >> 32`. Accumulated
- * error vs pebay.h is bounded by 1 ns² per update and scales as
- * 1/σ² relative to variance — negligible for σ >> 1 ns (i.e. every
- * real iomoments workload), but visible on integer-small textbook
- * fixtures like [2,4,4,4,5,5,7,9] where "true" variance is 4 and
- * the fixed-point version reads ≈3.625.
- *
- * A follow-up commit can tighten this by implementing manual 64×64→
- * 128 multiplication using BPF-safe 64-bit ops (ah·bh << 64 +
- * ah·bl << 32 + al·bh << 32 + al·bl). Deferred until a real
- * workload pressures the precision floor.
- */
 struct iomoments_summary_bpf {
 	iomoments_u64 n;
 	iomoments_s64 m1_fp; /* Q32.32 signed ns */
 	iomoments_s64 m2; /* raw ns² — integer-approximate Welford accumulator */
+	struct s128 m3; /* raw ns³ */
+	struct s128 m4; /* raw ns⁴ */
 };
 
 #define IOMOMENTS_SUMMARY_BPF_ZERO                                             \
 	{                                                                      \
-		0, 0, 0                                                        \
+		0, 0, 0, {0, 0},                                               \
+		{                                                              \
+			0, 0                                                   \
+		}                                                              \
 	}
 
 IOMOMENTS_BPF_INLINE void
@@ -136,32 +122,10 @@ iomoments_summary_bpf_init(struct iomoments_summary_bpf *s)
 	s->n = 0;
 	s->m1_fp = 0;
 	s->m2 = 0;
+	s->m3 = s128_zero();
+	s->m4 = s128_zero();
 }
 
-/*
- * Incorporate one sample x (nanoseconds integer) into the summary.
- *
- * Fixed-point translation of Welford:
- *
- *   n'      = n + 1
- *   x_fp    = x << 32                  (lift sample to Q32.32)
- *   δ_fp    = x_fp - m1_fp              (Q32.32 residual pre-update)
- *   m1_fp  += δ_fp / n'                 (integer division; rounds
- *                                         toward zero with ≤ 1/2^32 ns
- *                                         truncation per step)
- *   δ'_fp   = x_fp - m1_fp              (Q32.32 residual post-update)
- *   product = (δ_fp >> 32) * (δ'_fp >> 32)
- *                                       (Q0.0 ns² — drop fractional
- *                                         bits before multiplying so
- *                                         the product fits int64 for
- *                                         realistic sample ranges)
- *   m2     += product
- *
- * The ≥32-bit upshift on x assumes x < 2^31 ns (~2.1 s). Larger
- * single-sample latencies overflow x_fp. Caller must keep samples
- * under that bound; iomoments' probe phase rejects samples beyond
- * realistic thresholds anyway (diagnostic signal).
- */
 /*
  * The BPF target rejects signed division; do unsigned division on
  * the absolute value and restore the sign manually. n is always > 0
@@ -176,41 +140,133 @@ IOMOMENTS_BPF_INLINE iomoments_s64 iomoments_bpf_signed_div(iomoments_s64 num,
 	return -(iomoments_s64)((iomoments_u64)(-num) / den);
 }
 
+/*
+ * Incorporate one sample x (nanoseconds integer) into the summary.
+ *
+ * Pébay 2008 eq (2.1) at k=4, integer-ns form. Update order is
+ * load-bearing — m4 uses the OLD m2 and m3, m3 uses the OLD m2,
+ * m2 updates last. Do NOT reorder without recomputing the
+ * algebraic equivalence.
+ *
+ *   n_old = n; n += 1
+ *   δ_fp     = (x << 32) - m1_fp                         (Q32.32 ns)
+ *   m1_fp   += δ_fp / n
+ *   δ_int    = δ_fp >> 32                                (s64 ns)
+ *   δ²       = δ_int · δ_int                             (s64, ≥0)
+ *   m4 += δ⁴·n_old·(n²-3n+3)/n³ + 6·δ²·m2/n² - 4·δ·m3/n
+ *   m3 += δ³·n_old·(n-2)/n²    - 3·δ·m2/n
+ *   m2 += δ_int · δ_post_int          (existing Welford k=2)
+ *
+ * Each multi-precision term is computed with multiplies and
+ * divides interleaved to keep s128 intermediates within bounds at
+ * worst-case δ saturation (δ ≤ 2³¹).
+ */
 IOMOMENTS_BPF_INLINE void
 iomoments_summary_bpf_update(struct iomoments_summary_bpf *s, iomoments_u64 x)
 {
+	iomoments_u64 n_old = s->n;
 	s->n += 1;
+	iomoments_u64 n = s->n;
+
 	iomoments_s64 x_fp = (iomoments_s64)(x << IOMOMENTS_BPF_FRAC_BITS);
 	iomoments_s64 delta_fp = x_fp - s->m1_fp;
-	iomoments_s64 delta_n_fp = iomoments_bpf_signed_div(delta_fp, s->n);
+	iomoments_s64 delta_n_fp = iomoments_bpf_signed_div(delta_fp, n);
 	s->m1_fp += delta_n_fp;
 	iomoments_s64 delta_post_fp = x_fp - s->m1_fp;
-	/*
-	 * Compute product at integer-ns resolution: shift each Q32.32
-	 * delta down to integer ns before multiplying. Keeps everything
-	 * in 64-bit signed arithmetic (BPF-safe). Sub-ns fractional
-	 * contributions are discarded — see struct comment for the
-	 * precision tradeoff.
-	 */
+
 	iomoments_s64 delta_int = delta_fp >> IOMOMENTS_BPF_FRAC_BITS;
 	iomoments_s64 delta_post_int = delta_post_fp >> IOMOMENTS_BPF_FRAC_BITS;
+	iomoments_s64 delta_sq = delta_int * delta_int; /* ≥ 0, fits s64 */
+
+	/* Snapshot OLD m2, m3 — m4 update reads both, m3 update reads m2. */
+	iomoments_s64 m2_old = s->m2;
+	struct s128 m3_old = s->m3;
+
+	/* === m4 update ============================================ */
+	struct s128 m4_inc = s128_zero();
+
+	/* Term 1: δ⁴·n_old·(n²-3n+3)/n³.
+	 * For n=1 (n_old=0) the term is identically zero — skip. */
+	if (n_old > 0) {
+		/* polynomial = n²-3n+3. n=2: 1, n=3: 3, n=4: 7, all ≥1. */
+		iomoments_u64 polynomial = n * n - 3 * n + 3;
+		struct s128 t = s64_mul_s64(delta_sq, delta_sq); /* δ⁴ */
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, n_old);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, polynomial);
+		t = s128_div_u64(t, n);
+		m4_inc = s128_add(m4_inc, t);
+	}
+
+	/* Term 2: 6·δ²·m2/n². Divide first to keep s128 bounded. */
+	{
+		struct s128 t = s64_mul_s64(delta_sq, m2_old);
+		t = s128_div_u64(t, n);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, 6);
+		m4_inc = s128_add(m4_inc, t);
+	}
+
+	/* Term 3: -4·δ·m3/n. */
+	{
+		struct s128 t = s128_mul_s64(m3_old, delta_int);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, 4);
+		m4_inc = s128_sub(m4_inc, t);
+	}
+
+	s->m4 = s128_add(s->m4, m4_inc);
+
+	/* === m3 update (uses OLD m2) ============================== */
+	struct s128 m3_inc = s128_zero();
+
+	/* Term 1: δ³·n_old·(n-2)/n². For n < 3 the (n-2)·n_old factor is
+	 * 0; skip to avoid u64 underflow on (n-2). */
+	if (n >= 3) {
+		struct s128 delta_cube = s64_mul_s64(delta_sq, delta_int);
+		struct s128 t = s128_mul_u64(delta_cube, n_old);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, n - 2);
+		t = s128_div_u64(t, n);
+		m3_inc = s128_add(m3_inc, t);
+	}
+
+	/* Term 2: -3·δ·m2/n. */
+	{
+		struct s128 t = s64_mul_s64(delta_int, m2_old);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, 3);
+		m3_inc = s128_sub(m3_inc, t);
+	}
+
+	s->m3 = s128_add(s->m3, m3_inc);
+
+	/* === m2 update (Welford k=2, unchanged from prior) ======== */
 	s->m2 += delta_int * delta_post_int;
 }
 
 /*
- * Merge partial summary `b` into `a` in place.
- *
- * Pébay eq. (3.2)/(3.3) at k=2, translated to fixed-point:
+ * Merge partial summary `b` into `a` in place. Pébay 2008
+ * eq (3.2)-(3.5) at k=4, integer-ns form.
  *
  *   n      = n_a + n_b
- *   δ_fp   = m1_b - m1_a                 (Q32.32)
- *   m1_new_fp = (n_a·m1_a_fp + n_b·m1_b_fp) / n
- *   correction = (n_a · n_b · (δ_int)²) / n
- *                                         (Q0.0 ns², integer math)
- *   m2_new = m2_a + m2_b + correction
+ *   δ      = m1_b - m1_a
+ *   m1     = (n_a·m1_a + n_b·m1_b) / n
+ *   m2    += δ²·n_a·n_b / n
+ *   m3    += δ³·n_a·n_b·(n_a-n_b)/n² + 3δ·(n_a·m2_b - n_b·m2_a)/n
+ *   m4    += δ⁴·n_a·n_b·(n_a²-n_a·n_b+n_b²)/n³
+ *           + 6δ²·(n_a²·m2_b + n_b²·m2_a)/n²
+ *           + 4δ·(n_a·m3_b - n_b·m3_a)/n
  *
- * Aliasing-safe (caller may pass &s, &s): snapshot `b` before
- * writing `a`, matching pebay.h's convention.
+ * Aliasing-safe: snapshot `b` before any write to `a`, matching
+ * pebay.h's convention so iomoments_summary_bpf_merge(&s, &s) is
+ * well-defined.
+ *
+ * NOT on the BPF hot path. iomoments.c reads each per-CPU summary
+ * via bpf_summary_to_ref and merges in double via pebay.h. This
+ * BPF-side merge exists for round-trip testing of the integer
+ * parallel-combine rule against the canonical one.
  */
 IOMOMENTS_BPF_INLINE void
 iomoments_summary_bpf_merge(struct iomoments_summary_bpf *a,
@@ -225,44 +281,107 @@ iomoments_summary_bpf_merge(struct iomoments_summary_bpf *a,
 	}
 	struct iomoments_summary_bpf b_snap = *b;
 	iomoments_u64 n = a->n + b_snap.n;
+	iomoments_u64 n_a = a->n;
+	iomoments_u64 n_b = b_snap.n;
+
 	iomoments_s64 delta_fp = b_snap.m1_fp - a->m1_fp;
 	iomoments_s64 delta_int = delta_fp >> IOMOMENTS_BPF_FRAC_BITS;
-	/*
-	 * Merge-time weighted mean: work at integer-ns resolution to
-	 * stay under int64 overflow for realistic n.
-	 *   m1_new_int = (m1_a_int·n_a + m1_b_int·n_b) / n
-	 *   m1_new_fp  = m1_new_int << 32
-	 * Loses the Q32.32 fractional contributions of each summary's
-	 * m1 during merge. Acceptable for per-CPU aggregation where
-	 * each contributor already has n·σ-scale precision; catastrophic
-	 * only when merging many tiny summaries (sub-microsecond n),
-	 * which isn't iomoments' aggregation model.
-	 */
+	iomoments_s64 delta_sq = delta_int * delta_int; /* ≥ 0 */
+
+	/* m1 (Welford k=2 — unchanged from prior). */
 	iomoments_s64 m1_a_int = a->m1_fp >> IOMOMENTS_BPF_FRAC_BITS;
 	iomoments_s64 m1_b_int = b_snap.m1_fp >> IOMOMENTS_BPF_FRAC_BITS;
-	iomoments_s64 m1_new_int_num = m1_a_int * (iomoments_s64)a->n +
-				       m1_b_int * (iomoments_s64)b_snap.n;
+	iomoments_s64 m1_new_int_num =
+		m1_a_int * (iomoments_s64)n_a + m1_b_int * (iomoments_s64)n_b;
 	iomoments_s64 m1_new_int = iomoments_bpf_signed_div(m1_new_int_num, n);
 	iomoments_s64 m1_new_fp = m1_new_int << IOMOMENTS_BPF_FRAC_BITS;
-	/*
-	 * Pébay correction: δ_int² · n_a · n_b / n in integer-ns². All
-	 * factors fit int64 for realistic iomoments n and δ. Same
-	 * integer-ns precision caveat as the update.
+
+	/* m2 correction: δ²·n_a·n_b/n. */
+	iomoments_u64 n_product = n_a * n_b;
+	iomoments_s64 m2_correction = (iomoments_s64)(n_product / n) * delta_sq;
+	iomoments_s64 m2_new = a->m2 + b_snap.m2 + m2_correction;
+
+	/* m3 corrections: δ³·n_a·n_b·(n_a-n_b)/n² + 3δ·(n_a·m2_b - n_b·m2_a)/n.
 	 */
-	iomoments_u64 n_product = a->n * b_snap.n;
-	iomoments_s64 correction =
-		(iomoments_s64)(n_product / n) * (delta_int * delta_int);
+	struct s128 m3_correction = s128_zero();
+	{
+		struct s128 delta_cube = s64_mul_s64(delta_sq, delta_int);
+		iomoments_s64 n_diff = (iomoments_s64)n_a - (iomoments_s64)n_b;
+		struct s128 t = s128_mul_u64(delta_cube, n_a);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, n_b);
+		t = s128_div_u64(t, n);
+		t = s128_mul_s64(t, n_diff);
+		m3_correction = s128_add(m3_correction, t);
+	}
+	{
+		struct s128 prod_a = s64_mul_s64((iomoments_s64)n_a, b_snap.m2);
+		struct s128 prod_b = s64_mul_s64((iomoments_s64)n_b, a->m2);
+		struct s128 diff = s128_sub(prod_a, prod_b);
+		diff = s128_mul_s64(diff, delta_int);
+		diff = s128_div_u64(diff, n);
+		diff = s128_mul_u64(diff, 3);
+		m3_correction = s128_add(m3_correction, diff);
+	}
+	struct s128 m3_new = s128_add(a->m3, b_snap.m3);
+	m3_new = s128_add(m3_new, m3_correction);
+
+	/* m4 corrections. */
+	struct s128 m4_correction = s128_zero();
+	/* Term: δ⁴·n_a·n_b·(n_a²-n_a·n_b+n_b²)/n³. */
+	{
+		iomoments_u64 polynomial = n_a * n_a - n_a * n_b + n_b * n_b;
+		struct s128 delta_4 = s64_mul_s64(delta_sq, delta_sq);
+		struct s128 t = s128_div_u64(delta_4, n);
+		t = s128_mul_u64(t, n_a);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, n_b);
+		t = s128_div_u64(t, n);
+		t = s128_mul_u64(t, polynomial);
+		m4_correction = s128_add(m4_correction, t);
+	}
+	/* Term: 6δ²·(n_a²·m2_b + n_b²·m2_a)/n². */
+	{
+		iomoments_u64 n_a_sq = n_a * n_a;
+		iomoments_u64 n_b_sq = n_b * n_b;
+		struct s128 prod_a =
+			s128_mul_u64(s128_from_s64(b_snap.m2), n_a_sq);
+		struct s128 prod_b = s128_mul_u64(s128_from_s64(a->m2), n_b_sq);
+		struct s128 sum = s128_add(prod_a, prod_b);
+		sum = s128_mul_u64(sum, (iomoments_u64)delta_sq);
+		sum = s128_div_u64(sum, n);
+		sum = s128_div_u64(sum, n);
+		sum = s128_mul_u64(sum, 6);
+		m4_correction = s128_add(m4_correction, sum);
+	}
+	/* Term: 4δ·(n_a·m3_b - n_b·m3_a)/n. */
+	{
+		struct s128 prod_a = s128_mul_u64(b_snap.m3, n_a);
+		struct s128 prod_b = s128_mul_u64(a->m3, n_b);
+		struct s128 diff = s128_sub(prod_a, prod_b);
+		diff = s128_mul_s64(diff, delta_int);
+		diff = s128_div_u64(diff, n);
+		diff = s128_mul_u64(diff, 4);
+		m4_correction = s128_add(m4_correction, diff);
+	}
+	struct s128 m4_new = s128_add(a->m4, b_snap.m4);
+	m4_new = s128_add(m4_new, m4_correction);
+
 	a->n = n;
 	a->m1_fp = m1_new_fp;
-	a->m2 = a->m2 + b_snap.m2 + correction;
+	a->m2 = m2_new;
+	a->m3 = m3_new;
+	a->m4 = m4_new;
 }
 
 /*
  * Readouts — convert fixed-point summary to double for reporting.
- * The userspace consumer calls these after reading the per-CPU
- * summary out of a BPF map. Doubles are OK here: readout is
- * userspace.
+ * Userspace-only (FP rejected by BPF verifier in tracing context).
  */
+#if !defined(__bpf__)
+
+#include <math.h>
+
 IOMOMENTS_BPF_INLINE double
 iomoments_summary_bpf_mean_ns(const struct iomoments_summary_bpf *s)
 {
@@ -277,5 +396,39 @@ iomoments_summary_bpf_variance_ns2(const struct iomoments_summary_bpf *s)
 	}
 	return (double)s->m2 / (double)s->n;
 }
+
+/*
+ * Population skewness γ₁ = √n · M3 / M2^(3/2). Returns 0 on empty
+ * summary or near-zero M2 (constant stream — skewness undefined).
+ */
+IOMOMENTS_BPF_INLINE double
+iomoments_summary_bpf_skewness(const struct iomoments_summary_bpf *s)
+{
+	if (s->n == 0 || s->m2 <= 0) {
+		return 0.0;
+	}
+	double nf = (double)s->n;
+	double m2_d = (double)s->m2;
+	double m3_d = s128_to_double(s->m3);
+	return sqrt(nf) * m3_d / (m2_d * sqrt(m2_d));
+}
+
+/*
+ * Population excess kurtosis γ₂ = n · M4 / M2² - 3. Zero for
+ * Gaussian. Returns 0 on empty / near-zero-M2 summary.
+ */
+IOMOMENTS_BPF_INLINE double
+iomoments_summary_bpf_excess_kurtosis(const struct iomoments_summary_bpf *s)
+{
+	if (s->n == 0 || s->m2 <= 0) {
+		return 0.0;
+	}
+	double nf = (double)s->n;
+	double m2_d = (double)s->m2;
+	double m4_d = s128_to_double(s->m4);
+	return nf * m4_d / (m2_d * m2_d) - 3.0;
+}
+
+#endif /* !__bpf__ */
 
 #endif /* IOMOMENTS_PEBAY_BPF_H */
