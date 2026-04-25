@@ -420,6 +420,66 @@ static void test_s128_mul_u64_lcg_sweep(void)
 	}
 }
 
+/* --- s128_mul_s64 ----------------------------------------------------- */
+
+static void test_s128_mul_s64_boundaries(void)
+{
+	struct {
+		s128_ref v;
+		iomoments_s64 m;
+	} cases[] = {
+		{0, 0},
+		{1, 0},
+		{0, -1},
+		{1, 1},
+		{-1, 1},
+		{1, -1},
+		{-1, -1},
+		/* Positive s128 × negative s64. */
+		{(s128_ref)0x100, -2},
+		/* Negative s128 × positive s64. */
+		{-(s128_ref)0x100, 2},
+		/* Negative s128 × negative s64 → positive. */
+		{-(s128_ref)0x100, -2},
+		/* INT64_MIN as multiplier. */
+		{(s128_ref)1, (iomoments_s64)0x8000000000000000ULL},
+		{-(s128_ref)1, (iomoments_s64)0x8000000000000000ULL},
+		/* s128 straddling 64-bit boundary. */
+		{(s128_ref)((u128_ref)1 << 70), -3},
+		{-(s128_ref)((u128_ref)1 << 70), -3},
+	};
+	const size_t n = sizeof(cases) / sizeof(cases[0]);
+	for (size_t i = 0; i < n; i++) {
+		s128_ref expected = cases[i].v * (s128_ref)cases[i].m;
+		struct s128 got =
+			s128_mul_s64(s128_from_ref(cases[i].v), cases[i].m);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_mul_s64 case %zu m=%lld got hi=%llx "
+				 "lo=%llx\n",
+				 i, (long long)cases[i].m,
+				 (unsigned long long)got.hi,
+				 (unsigned long long)got.lo);
+		}
+	}
+}
+
+static void test_s128_mul_s64_lcg_sweep(void)
+{
+	iomoments_u64 state = 0x1357924680ABCDEFULL;
+	for (int trial = 0; trial < 2000; trial++) {
+		iomoments_u64 v_hi = lcg_next(&state);
+		iomoments_u64 v_lo = lcg_next(&state);
+		iomoments_s64 m = (iomoments_s64)lcg_next(&state);
+		s128_ref v_ref = (s128_ref)(((u128_ref)v_hi << 64) | v_lo);
+		s128_ref expected = v_ref * (s128_ref)m;
+		struct s128 got = s128_mul_s64(s128_from_ref(v_ref), m);
+		if (!s128_eq_ref(got, expected)) {
+			FAIL_FMT("s128_mul_s64 LCG trial %d\n", trial);
+			return;
+		}
+	}
+}
+
 /* --- s128_div_u64 ----------------------------------------------------- */
 
 static void test_s128_div_u64_boundaries(void)
@@ -493,6 +553,8 @@ int main(void)
 	test_s128_to_double();
 	test_s128_mul_u64_boundaries();
 	test_s128_mul_u64_lcg_sweep();
+	test_s128_mul_s64_boundaries();
+	test_s128_mul_s64_lcg_sweep();
 	test_s128_div_u64_boundaries();
 	test_s128_div_u64_lcg_sweep();
 

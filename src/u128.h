@@ -262,6 +262,36 @@ IOMOMENTS_BPF_INLINE struct s128 s128_mul_u64(struct s128 v, iomoments_u64 m)
 }
 
 /*
+ * Multiply s128 by a signed s64. Sign of the result is the XOR of
+ * the input signs.
+ *
+ * Implemented as a thin wrapper over s128_mul_u64: factor out m's
+ * sign, multiply by |m| as u64, conditionally negate the result.
+ * Faster than building a fully-signed s128_mul_s128 since one
+ * operand is known to fit s64 — reuses the truncating-multiply
+ * already provided.
+ */
+IOMOMENTS_BPF_INLINE struct s128 s128_mul_s64(struct s128 v, iomoments_s64 m)
+{
+	int m_neg = (m < 0);
+	iomoments_u64 abs_m = m_neg ? (~(iomoments_u64)m + 1ULL)
+				    : (iomoments_u64)m;
+	struct s128 prod = s128_mul_u64(v, abs_m);
+	if (!m_neg) {
+		return prod;
+	}
+	/* Negate prod (~x + 1 across both halves with carry from lo). */
+	iomoments_u64 neg_lo = ~prod.lo + 1ULL;
+	/* cppcheck-suppress knownConditionTrueFalse */
+	iomoments_u64 carry = (neg_lo == 0) ? 1ULL : 0ULL;
+	iomoments_u64 neg_hi = ~(iomoments_u64)prod.hi + carry;
+	struct s128 r;
+	r.hi = (iomoments_s64)neg_hi;
+	r.lo = neg_lo;
+	return r;
+}
+
+/*
  * Divide s128 by a positive u64, returning s128 quotient.
  *
  * Standard shift-and-subtract long division: 128 iterations, each
