@@ -25,7 +25,8 @@
  *
  *   m1_fp  iomoments_s64 in Q32.32 fixed-point ns. Integer part up
  *          to 2^31 ns (~2.1 s); fractional 2^-32 ns precision.
- *   m2     iomoments_s64 in raw ns² (Q0.0). Sum of squared deviations.
+ *   m2     iomoments_s64 in raw ns² (Q0.0). Sum of squared
+ *          deviations. See saturation analysis below.
  *   m3     struct s128 in raw ns³.  Sum of cubed deviations.
  *   m4     struct s128 in raw ns⁴.  Sum of fourth-power deviations.
  *
@@ -33,24 +34,30 @@
  * = 56 bytes per CPU. Within D009's 64-byte per_cpu_update_bytes
  * budget.
  *
- * Why s128 for m3, m4: realistic workloads (n=10⁹ samples at
- * σ=10μs) drive m3 ≈ n·γ·σ³ ≈ 10²¹ and m4 ≈ n·σ⁴ ≈ 10²⁵, both well
- * over s64's 9.2·10¹⁸ ceiling. Per-sample products in the update
- * also exceed s64 transiently. u128.h provides the multi-precision
- * primitives (s128_add/sub, s64×s64→s128, s128×u64, s128×s64,
- * s128÷u64 via Knuth D); the BPF verifier accepts hand-rolled
- * 64-bit ops but rejects compiler __multi3/__divti3 libcalls.
+ * Why s128 for m3, m4: realistic workloads (n=10⁹ at σ=10μs) drive
+ * m3 ≈ n·γ·σ³ ≈ 10²¹ and m4 ≈ n·σ⁴ ≈ 10²⁵, both well over s64's
+ * 9.2·10¹⁸ ceiling. Per-sample products in the update also exceed
+ * s64 transiently. u128.h provides the primitives (s128_add/sub,
+ * s64×s64→s128, s128×u64, s128×s64, s128÷u64 via Knuth D); the
+ * BPF verifier accepts hand-rolled 64-bit ops but rejects compiler
+ * __multi3/__divti3 libcalls.
  *
- * Why m2 stays s64: m2 ≈ n·σ² must stay under s64 max ≈ 9.2·10¹⁸.
- * Solving for safe n given typical I/O σ:
- *   σ = 10μs   (NVMe-ish): n ≤ 9·10¹⁰ (90 billion samples)
- *   σ = 100μs  (SATA SSD): n ≤ 9·10⁸  (~900 million samples)
- *   σ = 1ms    (HDD)     : n ≤ 9·10⁶  (~9 million samples)
- * For SSD-class workloads m2 has multi-hour lifetime headroom at
- * realistic per-CPU IOPS; for HDD-class workloads userspace must
- * drain summaries before saturation. Documented limitation —
- * promoting m2 to s128 (matching m3/m4) is a follow-up if HDD
- * workloads pressure this floor.
+ * Why m2 stays s64 (and not s128): m2 ≈ n·σ² stays under s64 max
+ * 9.2·10¹⁸ for typical I/O σ:
+ *   σ = 10μs   (NVMe-ish): n ≤ 9·10¹⁰  (~years at realistic IOPS)
+ *   σ = 100μs  (SATA SSD): n ≤ 9·10⁸   (multiple days)
+ *   σ = 1ms    (HDD)     : n ≤ 9·10⁶   (minutes to hours)
+ * Promoting m2 to s128 to remove this floor would push the BPF
+ * verifier complexity past 6.12's 1M-instruction-step budget when
+ * the k=4 update math is verified end-to-end (the path-explosion
+ * count through the s128 op branches scales with the number of
+ * accumulators using them). 5.15/6.1 accept either form; 6.12+
+ * tightens the verifier complexity tracker. Operational mitigation
+ * for HDD-class workloads: userspace drains per-CPU summaries on a
+ * cadence shorter than the saturation window (every few minutes at
+ * σ=1ms) — which it does anyway for reporting. Promoting m2 to
+ * s128 unconditionally is a follow-up if the BPF verifier ever
+ * relaxes or if a non-drain-able use case lands.
  *
  * -----------------------------------------------------------------
  * Precision vs pebay.h
@@ -109,9 +116,9 @@
 struct iomoments_summary_bpf {
 	iomoments_u64 n;
 	iomoments_s64 m1_fp; /* Q32.32 signed ns */
-	iomoments_s64 m2; /* raw ns² — integer-approximate Welford accumulator */
-	struct s128 m3; /* raw ns³ */
-	struct s128 m4; /* raw ns⁴ */
+	iomoments_s64 m2;    /* raw ns² */
+	struct s128 m3;	     /* raw ns³ */
+	struct s128 m4;	     /* raw ns⁴ */
 };
 
 #define IOMOMENTS_SUMMARY_BPF_ZERO                                             \
@@ -248,7 +255,7 @@ iomoments_summary_bpf_update(struct iomoments_summary_bpf *s, iomoments_u64 x)
 
 	s->m3 = s128_add(s->m3, m3_inc);
 
-	/* === m2 update (Welford k=2, unchanged from prior) ======== */
+	/* === m2 update (Welford k=2, integer ns) ================== */
 	s->m2 += delta_int * delta_post_int;
 }
 
@@ -302,9 +309,17 @@ iomoments_summary_bpf_merge(struct iomoments_summary_bpf *a,
 	iomoments_s64 m1_new_int = iomoments_bpf_signed_div(m1_new_int_num, n);
 	iomoments_s64 m1_new_fp = m1_new_int << IOMOMENTS_BPF_FRAC_BITS;
 
-	/* m2 correction: δ²·n_a·n_b/n. */
+	/* m2 correction: δ²·n_a·n_b/n. The prior k=2 path divided
+	 * n_product by n first, losing the correction at small-n
+	 * splits (e.g. n_a=n_b=1, n=2 → integer 1/2 = 0). Compute the
+	 * correction in s128 so the multiply-then-divide is precision-
+	 * exact, then truncate to s64 for storage (correction stays
+	 * well within s64 for realistic δ²·n_a·n_b/n). */
 	iomoments_u64 n_product = n_a * n_b;
-	iomoments_s64 m2_correction = (iomoments_s64)(n_product / n) * delta_sq;
+	struct s128 m2_correction_s128 =
+		s64_mul_s64(delta_sq, (iomoments_s64)n_product);
+	m2_correction_s128 = s128_div_u64(m2_correction_s128, n);
+	iomoments_s64 m2_correction = (iomoments_s64)m2_correction_s128.lo;
 	iomoments_s64 m2_new = a->m2 + b_snap.m2 + m2_correction;
 
 	/* m3 corrections: δ³·n_a·n_b·(n_a-n_b)/n² + 3δ·(n_a·m2_b - n_b·m2_a)/n.
