@@ -505,6 +505,22 @@ static void test_s128_div_u64_boundaries(void)
 		{-5, 100},
 		/* Divisor large; quotient small. */
 		{(s128_ref)((u128_ref)1 << 90), 0xFFFFFFFFFFFFFFFFULL},
+		/* Knuth-D specific stress cases (post-rewrite from
+		 * shift-and-subtract): */
+		/* d = 1 forces normalization shift = 63 (max). */
+		{(s128_ref)((u128_ref)0xDEADBEEF << 64) | 0xCAFEBABE, 1},
+		{-(s128_ref)((u128_ref)0xDEADBEEF << 64) | 0xCAFEBABE, 1},
+		/* d with top bit already set: normalization shift = 0
+		 * (exercises the s==0 branch that avoids `>> 64` UB). */
+		{(s128_ref)((u128_ref)1 << 100), 0x8000000000000001ULL},
+		/* INT64_MIN numerator with d=1: result negation of the
+		 * most-negative value. */
+		{(s128_ref)((iomoments_s64)0x8000000000000000LL), 1},
+		/* num_hi just below vs. equal to d — exercises different
+		 * dispatch arms in s128_div_u64 (u_hi==0 vs u_hi<d vs
+		 * u_hi>=d). */
+		{(s128_ref)((u128_ref)0xFFFE << 64), 0xFFFFULL},
+		{(s128_ref)((u128_ref)0xFFFF << 64) | 1, 0xFFFFULL},
 	};
 	const size_t n = sizeof(cases) / sizeof(cases[0]);
 	for (size_t i = 0; i < n; i++) {

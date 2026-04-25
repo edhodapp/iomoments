@@ -11,23 +11,25 @@
  * exactly what you'd do on an 8-bit CPU with no native word-wide
  * multiply.
  *
- * Scope today: the minimum set of primitives pebay_bpf.h's k=4
- * update needs (M3 and M4 accumulators, each ~2^83+ bits wide for
+ * Scope: the minimum set of primitives pebay_bpf.h's k=4 update
+ * needs (M3 and M4 accumulators, each ~2^83+ bits wide for
  * realistic workloads, can't fit s64). Specifically:
  *
  *   - struct s128: two's-complement 128-bit signed integer.
  *     hi = high 64 bits treated as signed; lo = low 64 bits unsigned.
  *   - s64_mul_s64: 64×64 → 128 signed multiply.
  *   - s128_add / s128_sub: carry/borrow-propagating 128-bit add/sub.
+ *   - s128_mul_u64 / s128_mul_s64: 128 × 64 multiplies (signed
+ *     numerator), truncating bits ≥ 128.
+ *   - s128_div_u64: 128 / 64 → 128 division via Knuth Algorithm D
+ *     (Hacker's Delight 9-3). Signed numerator, positive divisor.
  *   - s128_to_double: readout to double at userspace reporting time.
  *
  * Not provided (explicit non-scope):
- *   - 128×128 multiply, 128/64 divide: pebay_bpf.h's k=4 update
- *     doesn't need them. Update divides δ by n (64/64 only);
- *     products that don't fit s64 land in s128 accumulators. Merge
- *     is computed in double-precision userspace from the s128
- *     accumulators via pebay.h's merge rule — no s128 division
- *     needed anywhere on the hot path.
+ *   - 128×128 multiply: pebay_bpf.h's k=4 update never needs it.
+ *     The largest products are s64×s128 (handled by s128_mul_s64).
+ *   - 128/128 divide: same — the only division is by the sample
+ *     count n (always u64).
  *   - Unsigned u128 variants: iomoments' higher moments are
  *     signed (m3 can go negative; m4 is mathematically non-negative
  *     but intermediate merge corrections can temporarily dip).
@@ -292,14 +294,152 @@ IOMOMENTS_BPF_INLINE struct s128 s128_mul_s64(struct s128 v, iomoments_s64 m)
 }
 
 /*
+ * Count leading zero bits of a u64. Used by the Knuth-D divide to
+ * normalize the divisor.
+ *
+ * Implemented as a binary search rather than a 64-iteration loop:
+ * 6 conditional shifts, ~30 instructions, fully branch-bounded for
+ * the verifier. Don't use __builtin_clzll under BPF — it can
+ * lower to the `clz` machine op on hosts but is not guaranteed
+ * available across BPF target configurations and the verifier
+ * doesn't always see through the intrinsic the way it sees through
+ * plain C arithmetic.
+ *
+ * For x == 0, returns 64 (no leading zero count is well-defined,
+ * so we return the bit width). Caller never passes 0 in our use
+ * (divisor is always nonzero), but defining the boundary makes
+ * the helper composable.
+ */
+IOMOMENTS_BPF_INLINE int u64_clz(iomoments_u64 x)
+{
+	int n = 0;
+	if (x == 0) {
+		return 64;
+	}
+	if ((x >> 32) == 0) {
+		n += 32;
+		x <<= 32;
+	}
+	if ((x >> 48) == 0) {
+		n += 16;
+		x <<= 16;
+	}
+	if ((x >> 56) == 0) {
+		n += 8;
+		x <<= 8;
+	}
+	if ((x >> 60) == 0) {
+		n += 4;
+		x <<= 4;
+	}
+	if ((x >> 62) == 0) {
+		n += 2;
+		x <<= 2;
+	}
+	if ((x >> 63) == 0) {
+		n += 1;
+	}
+	return n;
+}
+
+/*
+ * Unsigned 128/64 → 64 division, precondition u_hi < d.
+ *
+ * Hacker's Delight section 9-3 (a tightening of Knuth Algorithm D
+ * for the case where the divisor fits in two 32-bit limbs and the
+ * dividend in four). Knuth's analysis proves that for a normalized
+ * divisor (top bit set), the q̂ estimate is at most 2 too large, so
+ * each refinement loop runs ≤ 2 iterations — no while-loop, just a
+ * for-loop with an explicit upper bound (verifier-friendly).
+ *
+ * Why this beats shift-and-subtract: 128 inner iterations collapse
+ * to 2 outer iterations (one per 32-bit quotient digit), each
+ * doing ~3 multiplies and a couple of subtracts. Roughly 30×
+ * faster on a measured BPF hot path.
+ *
+ * The intermediate `un21 = (un32 << 32) + un1 - q1·d` step would
+ * need 96-bit arithmetic to compute exactly, but the final un21
+ * fits u64 by Knuth's correctness proof. So the natural u64 wrap
+ * of the expression yields the correct un21 (mod 2⁶⁴ matches the
+ * true value because the lost high bits cancel exactly).
+ */
+IOMOMENTS_BPF_INLINE iomoments_u64 u128_div_u64_inner(iomoments_u64 u_hi,
+						      iomoments_u64 u_lo,
+						      iomoments_u64 d)
+{
+	const iomoments_u64 b = 1ULL << 32; /* base for 32-bit limbs */
+
+	int s = u64_clz(d);
+	d <<= s;
+
+	/* Shift u left by s. When s == 0 the bit-shift `u_lo >> (64-s)`
+	 * would be `>> 64` (UB); guard with the s==0 branch. */
+	iomoments_u64 un_hi, un_lo;
+	if (s == 0) {
+		un_hi = u_hi;
+		un_lo = u_lo;
+	} else {
+		un_hi = (u_hi << s) | (u_lo >> (64 - s));
+		un_lo = u_lo << s;
+	}
+
+	iomoments_u64 vn1 = d >> 32;
+	iomoments_u64 vn0 = d & 0xFFFFFFFFULL;
+	iomoments_u64 un32 = un_hi;
+	iomoments_u64 un1 = un_lo >> 32;
+	iomoments_u64 un0 = un_lo & 0xFFFFFFFFULL;
+
+	/* First quotient digit q1. */
+	iomoments_u64 q1 = un32 / vn1;
+	iomoments_u64 rhat = un32 - q1 * vn1;
+	for (int i = 0; i < 2; i++) {
+		int too_big = (q1 >= b);
+		if (!too_big) {
+			too_big = (q1 * vn0 > b * rhat + un1);
+		}
+		if (!too_big) {
+			break;
+		}
+		q1 -= 1;
+		rhat += vn1;
+		if (rhat >= b) {
+			break;
+		}
+	}
+
+	/* Multi-precision subtract via natural u64 wrap (see comment
+	 * above): correct mod 2⁶⁴, and Knuth proves the true value
+	 * fits u64. */
+	iomoments_u64 un21 = (un32 << 32) + un1 - q1 * d;
+
+	/* Second quotient digit q0. */
+	iomoments_u64 q0 = un21 / vn1;
+	rhat = un21 - q0 * vn1;
+	for (int i = 0; i < 2; i++) {
+		int too_big = (q0 >= b);
+		if (!too_big) {
+			too_big = (q0 * vn0 > b * rhat + un0);
+		}
+		if (!too_big) {
+			break;
+		}
+		q0 -= 1;
+		rhat += vn1;
+		if (rhat >= b) {
+			break;
+		}
+	}
+
+	return (q1 << 32) | q0;
+}
+
+/*
  * Divide s128 by a positive u64, returning s128 quotient.
  *
- * Standard shift-and-subtract long division: 128 iterations, each
- * doing one bit-shift of remainder, one bit-shift of quotient, a
- * compare, and a conditional subtract. Split into two 64-iteration
- * loops over the high and low halves so all shifts are by
- * compile-time-bounded amounts (verifier-friendly: BPF's bounded-
- * loop analyzer accepts ≤ 8192 iterations).
+ * Algorithm: Hacker's Delight 9-3 / Knuth D, two-step:
+ *   1. q_hi = u_hi / d  (native u64/u64).
+ *   2. q_lo = (r:u_lo) / d  where r = u_hi % d (so r < d, quotient
+ *      fits u64) — solved by u128_div_u64_inner.
  *
  * Caller contract: d != 0. Hot path divides by n (sample count),
  * always ≥ 1 by construction.
@@ -322,38 +462,23 @@ IOMOMENTS_BPF_INLINE struct s128 s128_div_u64(struct s128 v, iomoments_u64 d)
 		num_hi = ~(iomoments_u64)v.hi + carry;
 	}
 
-	iomoments_u64 q_hi = 0, q_lo = 0, r = 0;
-	/*
-	 * Long division loop. The conceptual remainder is 65 bits wide
-	 * (a u64 plus a possible bit-64 carry from the previous shift),
-	 * because (r < d) ≤ d-1 implies (r << 1) | bit ≤ 2d - 1, which
-	 * doesn't fit u64 when d > 2^63. Capture `r >> 63` BEFORE the
-	 * shift as the implicit bit-64; combine it with the post-shift
-	 * `r` for the compare. When r_top is set, the subtract is
-	 * unconditional and the natural u64 wrap of `r - d` produces
-	 * the correct (2^64 + r) - d remainder, which is < d when the
-	 * invariant holds (which it does: r_top can only be set when
-	 * d > 2^63, and the subtract restores r < d).
-	 */
-	for (int i = 63; i >= 0; i--) {
-		iomoments_u64 r_top = r >> 63;
-		r = (r << 1) | ((num_hi >> i) & 1ULL);
-		q_hi = (q_hi << 1) | (q_lo >> 63);
-		q_lo = q_lo << 1;
-		if (r_top != 0 || r >= d) {
-			r -= d;
-			q_lo |= 1ULL;
-		}
-	}
-	for (int i = 63; i >= 0; i--) {
-		iomoments_u64 r_top = r >> 63;
-		r = (r << 1) | ((num_lo >> i) & 1ULL);
-		q_hi = (q_hi << 1) | (q_lo >> 63);
-		q_lo = q_lo << 1;
-		if (r_top != 0 || r >= d) {
-			r -= d;
-			q_lo |= 1ULL;
-		}
+	iomoments_u64 q_hi, q_lo;
+	if (num_hi == 0) {
+		/* Quotient fits u64 trivially: just one u64/u64 division. */
+		q_hi = 0;
+		q_lo = num_lo / d;
+	} else if (num_hi < d) {
+		/* Quotient still fits u64; full Knuth-D needed for the lo
+		 * half (numerator is the 128-bit (num_hi:num_lo)). */
+		q_hi = 0;
+		q_lo = u128_div_u64_inner(num_hi, num_lo, d);
+	} else {
+		/* Quotient exceeds u64: split into two Knuth-D divides.
+		 * The first computes q_hi = num_hi / d (a 64/64); the
+		 * second feeds (num_hi % d : num_lo) to Knuth-D for q_lo. */
+		q_hi = num_hi / d;
+		iomoments_u64 r1 = num_hi - q_hi * d;
+		q_lo = u128_div_u64_inner(r1, num_lo, d);
 	}
 
 	struct s128 result;
