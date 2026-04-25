@@ -215,6 +215,65 @@ static void test_carleman_yellow_on_constant_stream(void)
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
 }
 
+/* --- Hankel signal --------------------------------------------------- */
+
+static void test_hankel_green_on_gaussian(void)
+{
+	/* Gaussian: μ_2 = σ², μ_3 = 0, μ_4 = 3σ⁴.
+	 * det(H₃) = σ²·3σ⁴ − 0 − σ⁶ = 2σ⁶
+	 * κ = det/μ_2³ = 2σ⁶/σ⁶ = 2 → GREEN. */
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hankel(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
+}
+
+static void test_hankel_amber_on_two_atom_distribution(void)
+{
+	/* Symmetric two-atom ±1: μ_2 = 1, μ_3 = 0, μ_4 = 1.
+	 * det(H₃) = 1·1 − 0 − 1 = 0 → κ = 0 → AMBER. */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 500; i++) {
+		iomoments_summary_update(&g, -1.0);
+		iomoments_summary_update(&g, +1.0);
+	}
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hankel(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_hankel_amber_on_heavy_tail_spike(void)
+{
+	/* 999 at 1000ns + 1 at 100000ns: effectively two atoms,
+	 * Hankel rank-deficient → κ near 0 → AMBER. */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 999; i++) {
+		iomoments_summary_update(&g, 1000.0);
+	}
+	iomoments_summary_update(&g, 100000.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hankel(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_hankel_yellow_on_constant_stream(void)
+{
+	/* m_2 = 0 → cannot evaluate → YELLOW (variance_sanity catches
+	 * this case as RED separately). */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 1000; i++) {
+		iomoments_summary_update(&g, 42.0);
+	}
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hankel(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
 /* --- Nyquist + autocorr signals (synthetic Level-2 results) ----------- */
 
 static void test_nyquist_green_on_high_confidence(void)
@@ -397,6 +456,10 @@ int main(void)
 	test_carleman_green_on_gaussian();
 	test_carleman_amber_on_heavy_tail_spike();
 	test_carleman_yellow_on_constant_stream();
+	test_hankel_green_on_gaussian();
+	test_hankel_amber_on_two_atom_distribution();
+	test_hankel_amber_on_heavy_tail_spike();
+	test_hankel_yellow_on_constant_stream();
 	test_nyquist_green_on_high_confidence();
 	test_nyquist_amber_on_low_confidence();
 	test_autocorr_amber_on_strong_periodicity();

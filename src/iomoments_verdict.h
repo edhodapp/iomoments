@@ -43,9 +43,14 @@
  *                              series (μ₂/n)^(-½) + (μ₄/n)^(-¼);
  *                              the ratio of term-2 to term-1 is
  *                              a tail-weight diagnostic
+ *   8. hankel_conditioning  — 3×3 central-moment Hankel matrix
+ *                              determinant, normalized by μ₂³;
+ *                              detects low-rank atomic moment
+ *                              sequences (degenerate measures
+ *                              concentrated on few points) per
+ *                              Curto-Fialkow 1991
  *
  * Future evaluators (separate commits) named in D007 / D013:
- *   - Hankel matrix conditioning
  *   - Hill tail-index (needs order-statistic reservoir)
  *   - KS goodness-of-fit to log-normal (needs empirical CDF)
  *   - Spectral flatness sweep (varies window length)
@@ -379,6 +384,96 @@ iomoments_verdict_eval_carleman(const struct iomoments_summary *global,
 	iomoments_verdict_push(v, "carleman_partial_sum", status, r);
 }
 
+/*
+ * Hankel matrix conditioning (Curto-Fialkow 1991).
+ *
+ * For a positive measure on R, the Hankel matrix built on the
+ * moment sequence must be positive semi-definite. Its rank gives
+ * a lower bound on the number of atoms supporting the measure:
+ * rank-1 = single atom (degenerate), rank-2 = two atoms,
+ * rank ≥ 3 = supports continuous distributions. A near-singular
+ * (small-determinant) Hankel signals the moment sequence is
+ * "close to" being supported on fewer atoms — moments above
+ * order 2k can't distinguish atomic from continuous in that
+ * regime.
+ *
+ * We have central moments to k=4, so we form the 3×3 central
+ * Hankel:
+ *
+ *   H = [[ 1,   0,   μ₂ ],
+ *        [ 0,   μ₂,  μ₃ ],
+ *        [ μ₂,  μ₃,  μ₄ ]]
+ *
+ * with central moments μ_k = m_k / n. Its determinant expands to:
+ *
+ *   det(H) = μ₂·μ₄ − μ₃² − μ₂³
+ *
+ * Normalize by μ₂³ to get a dimensionless conditioning number:
+ *
+ *   κ = det(H) / μ₂³  =  (μ₄/μ₂² − 1) − (μ₃/μ₂^{3/2})²
+ *                     =  (excess kurtosis + 2) − skewness²
+ *
+ * Reference (analytic):
+ *   Gaussian:    κ = 3 − 1 − 0 = 2.0
+ *   exponential: κ = 9 − 1 − 4 = 4.0
+ *   uniform:     κ = 1.8 − 1 − 0 = 0.8
+ *   ±1 two-atom: κ = 1 − 1 − 0 = 0  (rank-deficient by construction)
+ *   log-normal:  κ → ∞ (pathologically large) for heavy tail
+ *
+ * Bands:
+ *   κ > 0.5         → GREEN  (well-conditioned, supports continuous)
+ *   0.1 .. 0.5      → YELLOW (constrained shape, e.g. uniform-ish)
+ *   ≤ 0.1 (or < 0)  → AMBER  (near-rank-deficient, atomic-like)
+ *   κ > 100         → AMBER  (pathologically large, log-normal-ish
+ *                              moment sequence — moment-indeterminate)
+ *
+ * Doesn't go RED on its own — the kurtosis_sanity signal already
+ * RED-flags degenerate spikes; carleman_partial_sum covers
+ * heavy-tail indeterminacy from another angle.
+ */
+static inline void
+iomoments_verdict_eval_hankel(const struct iomoments_summary *global,
+			      struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (global->n == 0 || global->m2 <= 0.0) {
+		snprintf(r, sizeof(r),
+			 "n=%lu, m_2=%.3g; cannot evaluate Hankel",
+			 (unsigned long)global->n, global->m2);
+		iomoments_verdict_push(v, "hankel_conditioning",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double n = (double)global->n;
+	double mu2 = global->m2 / n;
+	double mu3 = global->m3 / n;
+	double mu4 = global->m4 / n;
+	double mu2_cubed = mu2 * mu2 * mu2;
+	if (mu2_cubed <= 0.0) {
+		snprintf(r, sizeof(r), "μ_2³ ≤ 0; cannot normalize");
+		iomoments_verdict_push(v, "hankel_conditioning",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double det = mu2 * mu4 - mu3 * mu3 - mu2_cubed;
+	double kappa = det / mu2_cubed;
+	enum iomoments_verdict_status status;
+	if (kappa > 100.0) {
+		status = IOMOMENTS_VERDICT_AMBER;
+	} else if (kappa > 0.5) {
+		status = IOMOMENTS_VERDICT_GREEN;
+	} else if (kappa > 0.1) {
+		status = IOMOMENTS_VERDICT_YELLOW;
+	} else {
+		status = IOMOMENTS_VERDICT_AMBER;
+	}
+	snprintf(r, sizeof(r),
+		 "det(H₃)/μ₂³ = %.3f"
+		 " (Gaussian≈2.0, exp≈4.0; ≤0.1 atomic, >100 log-normal-ish)",
+		 kappa);
+	iomoments_verdict_push(v, "hankel_conditioning", status, r);
+}
+
 static inline void
 iomoments_verdict_eval_half_split(const struct iomoments_window *ring,
 				  size_t count, struct iomoments_verdict *v)
@@ -444,6 +539,7 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 	iomoments_verdict_eval_variance_sanity(global, out);
 	iomoments_verdict_eval_kurtosis_sanity(global, out);
 	iomoments_verdict_eval_carleman(global, out);
+	iomoments_verdict_eval_hankel(global, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);
 	iomoments_verdict_eval_half_split(ring, count, out);
