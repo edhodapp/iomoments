@@ -49,11 +49,15 @@
  *                              sequences (degenerate measures
  *                              concentrated on few points) per
  *                              Curto-Fialkow 1991
+ *   9. spectral_sweep        — sweeps virtual window length W' =
+ *                              k·W across k in {1, 2, 4, ...},
+ *                              minimum var_obs/var_pred ratio
+ *                              localizes hidden periodicity at
+ *                              the W' that triggered it
  *
  * Future evaluators (separate commits) named in D007 / D013:
  *   - Hill tail-index (needs order-statistic reservoir)
  *   - KS goodness-of-fit to log-normal (needs empirical CDF)
- *   - Spectral flatness sweep (varies window length)
  *
  * Userspace-only — uses doubles. Header-only by convention.
  */
@@ -68,6 +72,7 @@
 #include <string.h>
 
 #include "iomoments_level2.h"
+#include "iomoments_spectral.h"
 #include "pebay.h"
 
 enum iomoments_verdict_status {
@@ -78,7 +83,7 @@ enum iomoments_verdict_status {
 };
 
 #define IOMOMENTS_VERDICT_RATIONALE_MAX 192
-#define IOMOMENTS_VERDICT_MAX_SIGNALS 8
+#define IOMOMENTS_VERDICT_MAX_SIGNALS 12
 
 struct iomoments_verdict_signal {
 	const char *name;
@@ -474,6 +479,55 @@ iomoments_verdict_eval_hankel(const struct iomoments_summary *global,
 	iomoments_verdict_push(v, "hankel_conditioning", status, r);
 }
 
+/*
+ * Spectral-flatness sweep signal. Reads the precomputed
+ * iomoments_spectral_result (see iomoments_spectral.h) and emits
+ * GREEN/YELLOW/AMBER based on the minimum variance ratio across
+ * the sweep. The W' at which the minimum occurs is the suspected
+ * aliasing period.
+ *
+ * Bands match the per-base nyquist_confidence signal's
+ * sensibility — low ratio means windowed mean became phase-
+ * insensitive, indicating periodic content the simple moments
+ * average over rather than capture:
+ *
+ *   min ratio > 0.5  → GREEN  (smooth across scales)
+ *   0.2 .. 0.5       → YELLOW (mild structure at some scale)
+ *   ≤ 0.2            → AMBER  (clear aliasing at the W' of min)
+ */
+static inline void
+iomoments_verdict_eval_spectral(const struct iomoments_spectral_result *spec,
+				struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (spec->insufficient_data || spec->n_points == 0) {
+		snprintf(r, sizeof(r),
+			 "insufficient windows for spectral sweep");
+		iomoments_verdict_push(v, "spectral_sweep",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double min_ratio = spec->min_ratio;
+	double w_at_min = spec->points[spec->min_ratio_idx].window_seconds;
+	enum iomoments_verdict_status status;
+	if (min_ratio < 0.2) {
+		status = IOMOMENTS_VERDICT_AMBER;
+	} else if (min_ratio < 0.5) {
+		status = IOMOMENTS_VERDICT_YELLOW;
+	} else {
+		status = IOMOMENTS_VERDICT_GREEN;
+	}
+	const char *interpretation =
+		status == IOMOMENTS_VERDICT_AMBER    ? "aliasing suspected at "
+						       "this period"
+		: status == IOMOMENTS_VERDICT_YELLOW ? "mild periodic "
+						       "structure at this scale"
+						     : "smooth across scales";
+	snprintf(r, sizeof(r), "min ratio %.3f at W' = %.4f s; %s", min_ratio,
+		 w_at_min, interpretation);
+	iomoments_verdict_push(v, "spectral_sweep", status, r);
+}
+
 static inline void
 iomoments_verdict_eval_half_split(const struct iomoments_window *ring,
 				  size_t count, struct iomoments_verdict *v)
@@ -530,6 +584,7 @@ static inline void
 iomoments_verdict_compute(const struct iomoments_summary *global,
 			  const struct iomoments_window *ring, size_t count,
 			  const struct iomoments_level2_result *l2,
+			  const struct iomoments_spectral_result *spec,
 			  struct iomoments_verdict *out)
 {
 	memset(out, 0, sizeof(*out));
@@ -542,6 +597,7 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 	iomoments_verdict_eval_hankel(global, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);
+	iomoments_verdict_eval_spectral(spec, out);
 	iomoments_verdict_eval_half_split(ring, count, out);
 }
 

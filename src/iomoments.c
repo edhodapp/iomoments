@@ -53,10 +53,8 @@
  *
  * NOT yet in scope (follow-up):
  *
- *   - Carleman / Hankel determinacy signals (D007 named).
  *   - Hill tail-index estimator (needs order-statistic reservoir).
  *   - KS goodness-of-fit to log-normal (needs empirical CDF).
- *   - Spectral flatness sweep (varies window length at runtime).
  *   - Device / workload-class segmentation.
  *
  * Drain race:
@@ -86,6 +84,7 @@
 #include <bpf/libbpf.h>
 
 #include "iomoments_level2.h"
+#include "iomoments_spectral.h"
 #include "iomoments_verdict.h"
 #include "pebay.h"
 #include "pebay_bpf.h"
@@ -301,6 +300,27 @@ static void print_verdict(const struct iomoments_verdict *v)
 	}
 }
 
+static void print_spectral(const struct iomoments_spectral_result *spec)
+{
+	printf("\n  --- Spectral-flatness sweep (D013) ---\n");
+	if (spec->insufficient_data) {
+		printf("  insufficient windows for spectral sweep\n");
+		return;
+	}
+	printf("  k    W' (s)      n_virt  var_obs       var_clt       "
+	       "ratio\n");
+	for (size_t i = 0; i < spec->n_points; i++) {
+		const struct iomoments_spectral_point *p = &spec->points[i];
+		printf("  %-4zu %-10.4f  %-6zu  %-12.3f  %-12.3f  %.3f\n", p->k,
+		       p->window_seconds, p->n_virtual_windows, p->var_observed,
+		       p->var_predicted_clt, p->ratio);
+	}
+	if (spec->min_ratio_idx < spec->n_points) {
+		printf("  → min ratio %.3f at W' = %.4f s\n", spec->min_ratio,
+		       spec->points[spec->min_ratio_idx].window_seconds);
+	}
+}
+
 static void print_level2(const struct iomoments_level2_result *l2)
 {
 	printf("\n  --- Level 2 (D013): Nyquist + stationarity diagnostics"
@@ -331,6 +351,7 @@ static void print_level2(const struct iomoments_level2_result *l2)
 static void print_report(const struct iomoments_summary *global, int duration,
 			 int window_ms, size_t windows_captured,
 			 const struct iomoments_level2_result *l2,
+			 const struct iomoments_spectral_result *spec,
 			 const struct iomoments_verdict *verdict)
 {
 	printf("\niomoments report (duration %d s, window %d ms)\n", duration,
@@ -359,6 +380,7 @@ static void print_report(const struct iomoments_summary *global, int duration,
 	printf("  skewness        : %+.4f\n", skew);
 	printf("  excess kurtosis : %+.4f\n", kurt);
 	print_level2(l2);
+	print_spectral(spec);
 	print_verdict(verdict);
 }
 
@@ -527,10 +549,14 @@ int main(int argc, char **argv)
 	}
 	struct iomoments_level2_result l2;
 	iomoments_level2_analyze(window_ring, windows_count, &global, &l2);
+	struct iomoments_spectral_result spec;
+	double base_window_seconds = (double)window_ms / 1000.0;
+	iomoments_spectral_sweep(window_ring, windows_count, &global,
+				 base_window_seconds, &spec);
 	struct iomoments_verdict verdict;
 	iomoments_verdict_compute(&global, window_ring, windows_count, &l2,
-				  &verdict);
-	print_report(&global, duration, window_ms, windows_count, &l2,
+				  &spec, &verdict);
+	print_report(&global, duration, window_ms, windows_count, &l2, &spec,
 		     &verdict);
 
 	free(window_ring);
