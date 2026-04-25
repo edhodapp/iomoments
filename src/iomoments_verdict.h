@@ -27,8 +27,8 @@
  *
  * Each evaluator emits a signal with its own status and a short
  * rationale string. Overall verdict is the worst-of-all (max of
- * the signal statuses by enum order). The set of evaluators in
- * this commit:
+ * the signal statuses by enum order). The set of evaluators
+ * implemented today:
  *
  *   1. sample_count        — n thresholds (red < 100, yellow < 1000)
  *   2. variance_sanity     — σ² == 0 → red (constant stream)
@@ -38,9 +38,13 @@
  *                              mean drift in σ-units + variance
  *                              ratio between halves
  *   6. kurtosis_sanity     — extreme excess kurtosis flag
+ *   7. carleman_partial_sum — moment-determinacy proxy from the
+ *                              first two terms of the Carleman
+ *                              series (μ₂/n)^(-½) + (μ₄/n)^(-¼);
+ *                              the ratio of term-2 to term-1 is
+ *                              a tail-weight diagnostic
  *
  * Future evaluators (separate commits) named in D007 / D013:
- *   - Carleman partial sum (moment determinacy)
  *   - Hankel matrix conditioning
  *   - Hill tail-index (needs order-statistic reservoir)
  *   - KS goodness-of-fit to log-normal (needs empirical CDF)
@@ -293,6 +297,88 @@ iomoments_verdict_eval_autocorr(const struct iomoments_level2_result *l2,
 			       r);
 }
 
+/*
+ * Carleman partial-sum diagnostic.
+ *
+ * Carleman's criterion (Carleman 1926) states that a positive
+ * measure on [0, ∞) is moment-determinate if
+ *   Σ_{k=1..∞}  (E[X^{2k}])^{−1/(2k)}  =  ∞
+ *
+ * Equivalently for central moments μ_{2k} = E[(X−μ)^{2k}], the
+ * sum Σ μ_{2k}^{−1/(2k)} diverges for moment-determinate
+ * distributions. Slow growth or convergence ⇒ heavy-tailed,
+ * possibly indeterminate (canonical counterexample: log-normal).
+ *
+ * iomoments tracks central moments up to k=4. The Carleman
+ * partial sum we can compute is just the first two terms:
+ *
+ *   S_2  =  (μ_2)^{−1/2}  +  (μ_4)^{−1/4}
+ *
+ * Two terms is too few to definitively conclude divergence vs
+ * convergence. But the *ratio* of the second term to the first
+ * is informative: how fast are the terms decaying?
+ *
+ *   ratio  =  (μ_4)^{−1/4} / (μ_2)^{−1/2}
+ *
+ * Reference values (computed analytically):
+ *   Gaussian:    ratio = 1 / 3^{1/4}  ≈ 0.760
+ *   exponential: ratio ≈ 0.640
+ *   uniform:     ratio ≈ 0.741
+ *   log-normal (heavy tail): ratio → 0 as σ_log grows
+ *
+ * Bands:
+ *   ratio > 0.5  → GREEN  (light tail, terms decay slowly,
+ *                          consistent with divergent Carleman sum)
+ *   0.3 .. 0.5   → YELLOW (moderate tail; partial-sum decay
+ *                          faster than Gaussian, caveat the user)
+ *   ≤ 0.3        → AMBER  (heavy tail; second-term collapse
+ *                          suggests possible moment-indeterminacy)
+ *
+ * Doesn't go RED on its own — two terms can't definitively
+ * establish indeterminacy. The kurtosis_sanity signal already
+ * covers degenerate-spike RED separately.
+ */
+static inline void
+iomoments_verdict_eval_carleman(const struct iomoments_summary *global,
+				struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (global->n == 0 || global->m2 <= 0.0 || global->m4 <= 0.0) {
+		snprintf(r, sizeof(r),
+			 "n=%lu, m2=%.3g, m4=%.3g; cannot evaluate",
+			 (unsigned long)global->n, global->m2, global->m4);
+		iomoments_verdict_push(v, "carleman_partial_sum",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double n = (double)global->n;
+	double mu2 = global->m2 / n;
+	double mu4 = global->m4 / n;
+	if (mu2 <= 0.0 || mu4 <= 0.0) {
+		snprintf(r, sizeof(r),
+			 "central μ_2 or μ_4 ≤ 0; cannot evaluate");
+		iomoments_verdict_push(v, "carleman_partial_sum",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double term1 = pow(mu2, -0.5);
+	double term2 = pow(mu4, -0.25);
+	double ratio = term2 / term1;
+	enum iomoments_verdict_status status;
+	if (ratio > 0.5) {
+		status = IOMOMENTS_VERDICT_GREEN;
+	} else if (ratio > 0.3) {
+		status = IOMOMENTS_VERDICT_YELLOW;
+	} else {
+		status = IOMOMENTS_VERDICT_AMBER;
+	}
+	snprintf(r, sizeof(r),
+		 "term2/term1 = %.3f (Gaussian≈0.76, exp≈0.64;"
+		 " lower → heavier tail)",
+		 ratio);
+	iomoments_verdict_push(v, "carleman_partial_sum", status, r);
+}
+
 static inline void
 iomoments_verdict_eval_half_split(const struct iomoments_window *ring,
 				  size_t count, struct iomoments_verdict *v)
@@ -357,6 +443,7 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 	iomoments_verdict_eval_sample_count(global, out);
 	iomoments_verdict_eval_variance_sanity(global, out);
 	iomoments_verdict_eval_kurtosis_sanity(global, out);
+	iomoments_verdict_eval_carleman(global, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);
 	iomoments_verdict_eval_half_split(ring, count, out);

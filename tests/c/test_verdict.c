@@ -171,6 +171,50 @@ static void test_kurtosis_sanity_red_on_degenerate_spike(void)
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_RED);
 }
 
+/* --- Carleman signal -------------------------------------------------- */
+
+static void test_carleman_green_on_gaussian(void)
+{
+	/* Gaussian central moments: μ_2 = σ², μ_4 = 3σ⁴.
+	 * term1 = σ^(-1), term2 = (3σ⁴)^(-1/4) = σ^(-1) · 3^(-1/4)
+	 * ratio = 3^(-1/4) ≈ 0.7598. Comfortably > 0.5 → GREEN. */
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_carleman(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
+}
+
+static void test_carleman_amber_on_heavy_tail_spike(void)
+{
+	/* 999 samples at 1000 + 1 spike at 100000. m_4 dominated by the
+	 * spike, m_2 dominated less so → ratio collapses → AMBER. */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 999; i++) {
+		iomoments_summary_update(&g, 1000.0);
+	}
+	iomoments_summary_update(&g, 100000.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_carleman(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_carleman_yellow_on_constant_stream(void)
+{
+	/* m_2 = m_4 = 0 → cannot evaluate → YELLOW (not RED — that's
+	 * variance_sanity's job). */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 1000; i++) {
+		iomoments_summary_update(&g, 42.0);
+	}
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_carleman(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
 /* --- Nyquist + autocorr signals (synthetic Level-2 results) ----------- */
 
 static void test_nyquist_green_on_high_confidence(void)
@@ -350,6 +394,9 @@ int main(void)
 	test_variance_sanity_green_on_normal();
 	test_kurtosis_sanity_green_on_normal();
 	test_kurtosis_sanity_red_on_degenerate_spike();
+	test_carleman_green_on_gaussian();
+	test_carleman_amber_on_heavy_tail_spike();
+	test_carleman_yellow_on_constant_stream();
 	test_nyquist_green_on_high_confidence();
 	test_nyquist_amber_on_low_confidence();
 	test_autocorr_amber_on_strong_periodicity();
