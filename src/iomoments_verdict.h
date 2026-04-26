@@ -54,9 +54,14 @@
  *                              minimum var_obs/var_pred ratio
  *                              localizes hidden periodicity at
  *                              the W' that triggered it
+ *  10. hill_tail_index        — Hill (1975) tail-index estimator
+ *                              over the global top-K reservoir;
+ *                              the only signal that can RED on
+ *                              its own (α ≤ 1 → mean doesn't
+ *                              exist for a stationary measure,
+ *                              moments are the wrong primitive)
  *
- * Future evaluators (separate commits) named in D007 / D013:
- *   - Hill tail-index (needs order-statistic reservoir)
+ * Future evaluators (separate commits) named in D007:
  *   - KS goodness-of-fit to log-normal (needs empirical CDF)
  *
  * Userspace-only — uses doubles. Header-only by convention.
@@ -73,6 +78,7 @@
 
 #include "iomoments_level2.h"
 #include "iomoments_spectral.h"
+#include "iomoments_topk.h"
 #include "pebay.h"
 
 enum iomoments_verdict_status {
@@ -528,6 +534,69 @@ iomoments_verdict_eval_spectral(const struct iomoments_spectral_result *spec,
 	iomoments_verdict_push(v, "spectral_sweep", status, r);
 }
 
+/*
+ * Hill (1975) tail-index signal. Reads the global top-K reservoir
+ * built by merging every window's per-window top-K, computes the
+ * Hill estimator, bands the result.
+ *
+ * α > 2.5  → GREEN  (light tail; M2..M4 estimators well-defined)
+ * α in (2.0, 2.5] → YELLOW (kurtosis-edge; estimator noisy)
+ * α in (1.0, 2.0] → AMBER (heavy tail; kurtosis doesn't exist;
+ *                          variance does)
+ * α ≤ 1.0  → RED    (very heavy tail; mean doesn't exist for a
+ *                    stationary measure → moments are the wrong
+ *                    primitive)
+ *
+ * α̂ = 0 (cannot evaluate; reservoir empty or single-entry) →
+ * YELLOW with insufficient-data rationale.
+ *
+ * This is the only signal that can drive RED on a continuous
+ * distribution — the others (variance_sanity, kurtosis_sanity,
+ * sample_count) RED only on degenerate inputs (constant stream,
+ * spike, too few samples). Without Hill the heavy-tailed-but-
+ * continuous case slips through.
+ */
+static inline void
+iomoments_verdict_eval_hill(const struct iomoments_topk *global_topk,
+			    struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (global_topk->count < 2) {
+		snprintf(r, sizeof(r),
+			 "top-K count = %u < 2; insufficient for Hill",
+			 global_topk->count);
+		iomoments_verdict_push(v, "hill_tail_index",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double alpha = iomoments_hill_estimator(global_topk);
+	if (alpha == 0.0) {
+		snprintf(r, sizeof(r),
+			 "Hill estimator α = 0 (degenerate top-K)");
+		iomoments_verdict_push(v, "hill_tail_index",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	enum iomoments_verdict_status status;
+	const char *interpretation;
+	if (alpha <= 1.0) {
+		status = IOMOMENTS_VERDICT_RED;
+		interpretation = "mean doesn't exist; moments wrong primitive";
+	} else if (alpha <= 2.0) {
+		status = IOMOMENTS_VERDICT_AMBER;
+		interpretation = "heavy tail; kurtosis non-existent";
+	} else if (alpha <= 2.5) {
+		status = IOMOMENTS_VERDICT_YELLOW;
+		interpretation = "kurtosis-edge; estimator noisy";
+	} else {
+		status = IOMOMENTS_VERDICT_GREEN;
+		interpretation = "light tail";
+	}
+	snprintf(r, sizeof(r), "α̂ = %.3f (k=%u); %s", alpha, global_topk->count,
+		 interpretation);
+	iomoments_verdict_push(v, "hill_tail_index", status, r);
+}
+
 static inline void
 iomoments_verdict_eval_half_split(const struct iomoments_window *ring,
 				  size_t count, struct iomoments_verdict *v)
@@ -590,11 +659,19 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 	memset(out, 0, sizeof(*out));
 	out->overall = IOMOMENTS_VERDICT_GREEN;
 
+	/* Aggregate every window's top-K into a single global top-K. */
+	struct iomoments_topk global_topk;
+	iomoments_topk_init(&global_topk);
+	for (size_t i = 0; i < count; i++) {
+		iomoments_topk_merge(&global_topk, &ring[i].topk);
+	}
+
 	iomoments_verdict_eval_sample_count(global, out);
 	iomoments_verdict_eval_variance_sanity(global, out);
 	iomoments_verdict_eval_kurtosis_sanity(global, out);
 	iomoments_verdict_eval_carleman(global, out);
 	iomoments_verdict_eval_hankel(global, out);
+	iomoments_verdict_eval_hill(&global_topk, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);
 	iomoments_verdict_eval_spectral(spec, out);

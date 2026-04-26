@@ -85,12 +85,14 @@
 
 #include "iomoments_level2.h"
 #include "iomoments_spectral.h"
+#include "iomoments_topk.h"
 #include "iomoments_verdict.h"
 #include "pebay.h"
 #include "pebay_bpf.h"
 
 #define IOMOMENTS_BPF_OBJECT "build/iomoments.bpf.o"
 #define IOMOMENTS_MAP_NAME "iomoments_summary"
+#define IOMOMENTS_TOPK_MAP_NAME "iomoments_topk_map"
 #define IOMOMENTS_DEFAULT_DURATION 10
 #define IOMOMENTS_DEFAULT_WINDOW_MS 100
 #define IOMOMENTS_NSEC_PER_SEC 1000000000ULL
@@ -149,11 +151,9 @@ static void bpf_summary_to_ref(const struct iomoments_summary_bpf *bpf,
 }
 
 /*
- * Drain the per-CPU map into a single merged windowed summary, then
- * reset all per-CPU values to zero so the next window starts fresh.
- * See top-of-file note about the lookup→reset race; loss is bounded
- * to events that fire between the two map operations and is
- * acceptable for Level 2 diagnostics.
+ * Drain the per-CPU summary map into a single merged windowed
+ * summary, then reset all per-CPU values to zero. See top-of-file
+ * note about the lookup→reset race.
  */
 static int drain_and_reset_summaries(int map_fd, int ncpu,
 				     struct iomoments_summary *out)
@@ -193,6 +193,46 @@ static int drain_and_reset_summaries(int map_fd, int ncpu,
 }
 
 /*
+ * Drain the per-CPU top-K map into a single merged windowed top-K,
+ * then reset all per-CPU reservoirs. Same lookup→reset race as the
+ * summary drain; same acceptable-loss tradeoff.
+ */
+static int drain_and_reset_topk(int topk_map_fd, int ncpu,
+				struct iomoments_topk *out)
+{
+	struct iomoments_topk *percpu_values =
+		calloc((size_t)ncpu, sizeof(*percpu_values));
+	if (!percpu_values) {
+		perror("calloc percpu_topk");
+		return -ENOMEM;
+	}
+
+	__u32 key = 0;
+	int rc = bpf_map_lookup_elem(topk_map_fd, &key, percpu_values);
+	if (rc) {
+		fprintf(stderr, "bpf_map_lookup_elem (topk): %s\n",
+			strerror(errno));
+		free(percpu_values);
+		return rc;
+	}
+
+	iomoments_topk_init(out);
+	for (int cpu = 0; cpu < ncpu; cpu++) {
+		iomoments_topk_merge(out, &percpu_values[cpu]);
+	}
+
+	memset(percpu_values, 0, (size_t)ncpu * sizeof(*percpu_values));
+	rc = bpf_map_update_elem(topk_map_fd, &key, percpu_values, BPF_ANY);
+	free(percpu_values);
+	if (rc) {
+		fprintf(stderr, "bpf_map_update_elem (topk reset): %s\n",
+			strerror(errno));
+		return rc;
+	}
+	return 0;
+}
+
+/*
  * Add a window snapshot to a CLOCK_MONOTONIC-indexed ts. Helper for
  * the periodic-drain loop: takes a pre-computed wakeup timespec and
  * packs it into the u64 ns field on the snapshot.
@@ -211,12 +251,35 @@ static void timespec_add_ns(struct timespec *ts, uint64_t ns)
 }
 
 /*
- * Periodic-drain main loop. Wakes every window_ms via absolute
- * clock_nanosleep, drains the per-CPU map into the next ring slot,
- * stops at duration or signal. Returns the count of windows captured
- * (including the final post-loop drain) or SIZE_MAX on hard error.
+ * Drain summary + top-K maps into the next ring slot.
  */
-static size_t run_drain_loop(int map_fd, int ncpu, int duration, int window_ms,
+static int drain_one_window(int map_fd, int topk_map_fd, int ncpu,
+			    uint64_t end_ts_ns, struct iomoments_window *out)
+{
+	struct iomoments_summary win = IOMOMENTS_SUMMARY_ZERO;
+	if (drain_and_reset_summaries(map_fd, ncpu, &win) != 0) {
+		return -1;
+	}
+	struct iomoments_topk topk;
+	iomoments_topk_init(&topk);
+	if (drain_and_reset_topk(topk_map_fd, ncpu, &topk) != 0) {
+		return -1;
+	}
+	out->end_ts_ns = end_ts_ns;
+	out->summary = win;
+	out->topk = topk;
+	return 0;
+}
+
+/*
+ * Periodic-drain main loop. Wakes every window_ms via absolute
+ * clock_nanosleep, drains the per-CPU summary + top-K maps into
+ * the next ring slot, stops at duration or signal. Returns the
+ * count of windows captured (including the final post-loop drain)
+ * or SIZE_MAX on hard error.
+ */
+static size_t run_drain_loop(int map_fd, int topk_map_fd, int ncpu,
+			     int duration, int window_ms,
 			     struct iomoments_window *ring,
 			     size_t ring_capacity)
 {
@@ -249,25 +312,23 @@ static size_t run_drain_loop(int map_fd, int ncpu, int duration, int window_ms,
 				strerror(sleep_rc));
 			break;
 		}
-		struct iomoments_summary win = IOMOMENTS_SUMMARY_ZERO;
-		if (drain_and_reset_summaries(map_fd, ncpu, &win) != 0) {
-			return SIZE_MAX;
-		}
 		if (count < ring_capacity) {
-			ring[count].end_ts_ns = timespec_to_ns(&next_wakeup);
-			ring[count].summary = win;
+			if (drain_one_window(map_fd, topk_map_fd, ncpu,
+					     timespec_to_ns(&next_wakeup),
+					     &ring[count]) != 0) {
+				return SIZE_MAX;
+			}
 			count += 1;
 		}
 	}
 
 	/* Final drain: capture samples since the last periodic drain. */
 	if (count < ring_capacity) {
-		struct iomoments_summary win = IOMOMENTS_SUMMARY_ZERO;
-		if (drain_and_reset_summaries(map_fd, ncpu, &win) == 0) {
-			struct timespec final_ts;
-			clock_gettime(CLOCK_MONOTONIC, &final_ts);
-			ring[count].end_ts_ns = timespec_to_ns(&final_ts);
-			ring[count].summary = win;
+		struct timespec final_ts;
+		clock_gettime(CLOCK_MONOTONIC, &final_ts);
+		if (drain_one_window(map_fd, topk_map_fd, ncpu,
+				     timespec_to_ns(&final_ts),
+				     &ring[count]) == 0) {
 			count += 1;
 		}
 	}
@@ -503,6 +564,16 @@ int main(int argc, char **argv)
 	}
 	int map_fd = bpf_map__fd(map);
 
+	struct bpf_map *topk_map =
+		bpf_object__find_map_by_name(obj, IOMOMENTS_TOPK_MAP_NAME);
+	if (!topk_map) {
+		fprintf(stderr, "iomoments: map %s not found in object.\n",
+			IOMOMENTS_TOPK_MAP_NAME);
+		bpf_object__close(obj);
+		return 6;
+	}
+	int topk_map_fd = bpf_map__fd(topk_map);
+
 	int ncpu = libbpf_num_possible_cpus();
 	if (ncpu <= 0) {
 		fprintf(stderr, "iomoments: libbpf_num_possible_cpus: %d\n",
@@ -530,8 +601,9 @@ int main(int argc, char **argv)
 		" cadence (~%zu windows)...\n",
 		duration, window_ms, ring_capacity - 4);
 
-	size_t windows_count = run_drain_loop(map_fd, ncpu, duration, window_ms,
-					      window_ring, ring_capacity);
+	size_t windows_count = run_drain_loop(map_fd, topk_map_fd, ncpu,
+					      duration, window_ms, window_ring,
+					      ring_capacity);
 	if (windows_count == SIZE_MAX) {
 		free(window_ring);
 		bpf_object__close(obj);

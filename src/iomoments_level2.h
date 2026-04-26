@@ -43,17 +43,21 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "iomoments_topk.h"
 #include "pebay.h"
 
 /*
  * One windowed snapshot in the Level 2 input ring. `end_ts_ns` is
  * the CLOCK_MONOTONIC time at which userspace finished draining the
  * BPF per-CPU map; `summary` is the merged iomoments_summary across
- * CPUs for that window.
+ * CPUs for that window; `topk` is the merged top-K reservoir across
+ * CPUs for the same window (input to the Hill tail-index signal at
+ * verdict-compute time).
  */
 struct iomoments_window {
 	uint64_t end_ts_ns;
 	struct iomoments_summary summary;
+	struct iomoments_topk topk;
 };
 
 /*

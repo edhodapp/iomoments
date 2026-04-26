@@ -97,18 +97,27 @@ IOMOMENTS_BPF_INLINE void iomoments_topk_recompute_min(struct iomoments_topk *t)
 IOMOMENTS_BPF_INLINE void iomoments_topk_insert(struct iomoments_topk *t,
 						iomoments_u64 x)
 {
+	/*
+	 * The BPF verifier doesn't trust values loaded from a map and
+	 * treats them as unbounded scalars. Masking with (K - 1) gives
+	 * it a tight upper bound (K must be a power of 2 for this to be
+	 * exact — IOMOMENTS_TOPK_K = 32 is). Same idiom used by
+	 * libbpf's own examples for map-derived array indices.
+	 */
+	iomoments_u32 cnt = t->count & (IOMOMENTS_TOPK_K - 1);
+	iomoments_u32 mi = t->min_idx & (IOMOMENTS_TOPK_K - 1);
 	if (t->count < IOMOMENTS_TOPK_K) {
-		t->samples[t->count] = x;
+		t->samples[cnt] = x;
 		t->count += 1;
 		if (t->count == IOMOMENTS_TOPK_K) {
 			iomoments_topk_recompute_min(t);
 		}
 		return;
 	}
-	if (x <= t->samples[t->min_idx]) {
+	if (x <= t->samples[mi]) {
 		return;
 	}
-	t->samples[t->min_idx] = x;
+	t->samples[mi] = x;
 	iomoments_topk_recompute_min(t);
 }
 

@@ -48,6 +48,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include "iomoments_topk.h"
 #include "pebay_bpf.h"
 
 /*
@@ -91,6 +92,19 @@ struct {
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(struct iomoments_summary_bpf));
 } iomoments_summary SEC(".maps");
+
+/*
+ * Per-CPU top-K reservoir for the Hill (1975) tail-index estimator.
+ * Parallel to iomoments_summary; same drain cadence, separate
+ * value type. K=32 entries × 8 bytes + 8 bytes overhead = ~264
+ * bytes per CPU.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(struct iomoments_topk));
+} iomoments_topk_map SEC(".maps");
 
 SEC("fentry/blk_mq_start_request")
 int BPF_PROG(iomoments_rq_issue, struct request *rq)
@@ -137,5 +151,13 @@ int BPF_PROG(iomoments_rq_complete, struct request *rq)
 		return 0;
 	}
 	iomoments_summary_bpf_update(s, latency_ns);
+
+	/* Feed the same sample into the top-K reservoir. The Hill
+	 * tail-index signal reads this at verdict-compute time. */
+	struct iomoments_topk *t =
+		bpf_map_lookup_elem(&iomoments_topk_map, &key);
+	if (t) {
+		iomoments_topk_insert(t, latency_ns);
+	}
 	return 0;
 }

@@ -179,18 +179,42 @@ diagnostic_signals:
       Hill (1975) tail-index estimator for heavy-tailed I/O
       distributions. alpha <= moment order implies that moment does
       not exist in the population, so the sample moment is not a
-      summary of a meaningful quantity.
+      summary of a meaningful quantity. The only signal that goes
+      RED on a continuous distribution — the others (variance_sanity,
+      kurtosis_sanity, sample_count) RED only on degenerate inputs.
     method: >
-      alpha_hat = 1 / mean(log(X_{(i)} / X_{(k)})) for top-k order
-      statistics. k chosen by a reasonable-tail-size heuristic.
+      Per-CPU top-K reservoir (K=32) maintained in BPF alongside the
+      summary; userspace drains every window into a per-window topk;
+      verdict-compute merges all windows into a global top-K and
+      computes:
+      alpha_hat = 1 / ((1/(K-1)) * sum_{i=1..K-1} ln(X_(i) / X_(K)))
+      where X_(1) >= ... >= X_(K) are the order statistics.
     unit: dimensionless
     thresholds:
-      green: "alpha > 2.5"
-      yellow: "2.0 < alpha <= 2.5"
-      amber: "1.0 < alpha <= 2.0"
-      red: "alpha <= 1.0"
-    rationale: "D007 thesis; Hill 1975; Embrechts et al. 1997."
-    status: spec
+      green: "alpha > 2.5 (light tail; M2..M4 well-defined)"
+      yellow: "2.0 < alpha <= 2.5 (kurtosis-edge; estimator noisy)"
+      amber: "1.0 < alpha <= 2.0 (heavy tail; kurtosis non-existent)"
+      red: "alpha <= 1.0 (mean non-existent; moments wrong primitive)"
+    rationale: >
+      D007 thesis; Hill 1975; Embrechts et al. 1997. Calibrated
+      against synthetic Pareto(α) samples — α=1, 2, 3.5 fixtures
+      land in the predicted bands within standard error α/√k ≈
+      α/5.66 at K=32.
+    implementation_refs:
+      - "src/iomoments_topk.h:iomoments_topk_insert"
+      - "src/iomoments_topk.h:iomoments_topk_merge"
+      - "src/iomoments_topk.h:iomoments_hill_estimator"
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_hill"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "tests/c/test_topk.c:test_hill_pareto_alpha_2"
+      - "tests/c/test_topk.c:test_hill_pareto_alpha_1"
+      - "tests/c/test_topk.c:test_hill_pareto_alpha_3_5"
+      - "tests/c/test_verdict.c:test_hill_green_on_light_tail"
+      - "tests/c/test_verdict.c:test_hill_amber_on_heavy_tail"
+      - "tests/c/test_verdict.c:test_hill_red_on_very_heavy_tail"
+      - "tests/c/test_verdict.c:test_hill_yellow_on_empty_topk"
+    status: tested
 
   - name: ks_lognormal_pvalue
     description: >
@@ -430,7 +454,7 @@ verdict_nodes:
       higher moments do not exist in the population, or on degenerate
       streams (constant-value, near-zero variance).
     entrance_criteria:
-      - "hill_tail_index: red"
+      - "hill_tail_index: red (α <= 1; mean non-existent)"
       - "OR carleman_partial_sum: red (not currently emitted; reserved)"
       - "OR hankel_condition_number: red (not currently emitted; reserved)"
       - "OR ks_lognormal_pvalue: red AND raw-space also rejected"
@@ -669,6 +693,44 @@ domain_constraints:
       - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
       - "tests/c/test_level2.c:test_aliased_periodic_low_confidence"
       - "tests/c/test_verdict.c:test_spectral_sweep_sinusoid_at_period_4"
+    status: tested
+
+  - name: top_k_reservoir_for_order_statistics
+    description: >
+      Order-statistic-based diagnostic signals (Hill tail-index in
+      this commit; KS tail goodness-of-fit later) require access to
+      the largest K samples seen, not just the moments. iomoments
+      maintains a per-CPU bounded reservoir (K=32 chosen as the
+      sweet spot between BPF map size, verifier-cheap O(K) insert,
+      and Hill estimator standard error) updated alongside the
+      Pébay summary on every BPF block-layer event. Userspace
+      drains both maps each window and merges per-CPU top-Ks into
+      a per-window top-K; verdict-compute merges all windows into
+      a global top-K for Hill.
+    entity_ids: [moment, probe]
+    expression: >
+      Order-statistic signals operate over a fixed-size bounded
+      reservoir (K=32) maintained per-CPU in BPF. No ringbuf,
+      no unbounded streaming.
+    rationale: >
+      Bounded per-CPU reservoir matches the "in-kernel aggregation"
+      architecture iomoments has consistently chosen. BPF verifier
+      acceptance pinned by the K-power-of-2 mask on
+      reservoir-loaded indices (the verifier doesn't trust scalars
+      loaded from a map and treats them as unbounded; masking gives
+      a tight upper bound).
+    implementation_refs:
+      - "src/iomoments_topk.h:iomoments_topk_insert"
+      - "src/iomoments_topk.h:iomoments_topk_merge"
+      - "src/iomoments_topk.h:iomoments_topk_recompute_min"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+      - "src/iomoments.c:drain_and_reset_topk"
+    verification_refs:
+      - "tests/c/test_topk.c:test_init_zero"
+      - "tests/c/test_topk.c:test_insert_below_capacity_keeps_all"
+      - "tests/c/test_topk.c:test_insert_at_capacity_keeps_top_k"
+      - "tests/c/test_topk.c:test_insert_random_keeps_top_k"
+      - "tests/c/test_topk.c:test_merge_keeps_top_k_of_union"
     status: tested
 
   - name: periodic_per_cpu_drain

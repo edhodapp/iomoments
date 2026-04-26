@@ -23,6 +23,7 @@
 
 #include "../../src/iomoments_level2.h"
 #include "../../src/iomoments_spectral.h"
+#include "../../src/iomoments_topk.h"
 #include "../../src/iomoments_verdict.h"
 #include "../../src/pebay.h"
 
@@ -333,6 +334,79 @@ static void test_autocorr_green_on_low_correlation(void)
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
+/* --- Hill tail-index signal ------------------------------------------ */
+
+static double pareto_sample_in_test(double alpha, uint64_t *state)
+{
+	*state = (*state) * 6364136223846793005ULL + 1442695040888963407ULL;
+	uint64_t u53 = *state >> 11;
+	double u = (double)u53 / (double)(1ULL << 53);
+	if (u <= 0.0)
+		u = 1e-12;
+	return pow(u, -1.0 / alpha);
+}
+
+static void fill_pareto_topk(struct iomoments_topk *t, double alpha, size_t n,
+			     uint64_t seed)
+{
+	uint64_t state = seed;
+	for (size_t i = 0; i < n; i++) {
+		double s = pareto_sample_in_test(alpha, &state);
+		uint64_t q = (uint64_t)(s * 1e6);
+		if (q == 0)
+			q = 1;
+		iomoments_topk_insert(t, q);
+	}
+}
+
+static void test_hill_green_on_light_tail(void)
+{
+	/* Pareto(α=3.5) → estimator should land > 2.5 → GREEN. */
+	struct iomoments_topk t;
+	iomoments_topk_init(&t);
+	fill_pareto_topk(&t, 3.5, 10000, 0xCAFE001ULL);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hill(&t, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
+}
+
+static void test_hill_amber_on_heavy_tail(void)
+{
+	/* Pareto(α=1.5) → estimator should land in (1, 2] → AMBER. */
+	struct iomoments_topk t;
+	iomoments_topk_init(&t);
+	fill_pareto_topk(&t, 1.5, 10000, 0xBEEF002ULL);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hill(&t, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_hill_red_on_very_heavy_tail(void)
+{
+	/* Pareto(α=0.6) → estimator should land ≤ 1 → RED.
+	 * Mean doesn't exist for stationary measure → moments are
+	 * the wrong primitive. */
+	struct iomoments_topk t;
+	iomoments_topk_init(&t);
+	fill_pareto_topk(&t, 0.6, 10000, 0xF00D003ULL);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hill(&t, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_RED);
+}
+
+static void test_hill_yellow_on_empty_topk(void)
+{
+	struct iomoments_topk t;
+	iomoments_topk_init(&t);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hill(&t, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
 /* --- Spectral-flatness sweep + evaluator ------------------------------ */
 
 /* Forward decl — used by spectral fixtures; full definition is below
@@ -390,6 +464,7 @@ static void build_window_ring_sinusoidal_mean(struct iomoments_window *ring,
 		}
 		ring[i].end_ts_ns = i * 100000000ULL;
 		ring[i].summary = s;
+		iomoments_topk_init(&ring[i].topk);
 	}
 }
 
@@ -481,6 +556,8 @@ static void build_window_ring_stationary(struct iomoments_window *ring,
 	double cached = 0.0;
 	for (size_t i = 0; i < n_windows; i++) {
 		struct iomoments_summary s = IOMOMENTS_SUMMARY_ZERO;
+		struct iomoments_topk t;
+		iomoments_topk_init(&t);
 		for (size_t j = 0; j < k_per_window; j++) {
 			double sample;
 			if (has_cached) {
@@ -498,15 +575,21 @@ static void build_window_ring_stationary(struct iomoments_window *ring,
 				if (u1 <= 0.0)
 					u1 = 1e-12;
 				double r = sqrt(-2.0 * log(u1));
-				double t = 2.0 * 3.14159265358979323846 * u2;
-				sample = r * cos(t);
-				cached = r * sin(t);
+				double t_phase =
+					2.0 * 3.14159265358979323846 * u2;
+				sample = r * cos(t_phase);
+				cached = r * sin(t_phase);
 				has_cached = 1;
 			}
-			iomoments_summary_update(&s, mu + sigma * sample);
+			double x = mu + sigma * sample;
+			iomoments_summary_update(&s, x);
+			if (x > 0.0) {
+				iomoments_topk_insert(&t, (iomoments_u64)x);
+			}
 		}
 		ring[i].end_ts_ns = i * 100000000ULL;
 		ring[i].summary = s;
+		ring[i].topk = t;
 	}
 }
 
@@ -583,10 +666,12 @@ static void test_red_overall_propagates_from_constant_stream(void)
 		iomoments_summary_update(&g, 42.0);
 	}
 	struct iomoments_window ring[16];
+	memset(ring, 0, sizeof(ring));
 	for (size_t i = 0; i < 16; i++) {
 		ring[i].end_ts_ns = i * 100000000ULL;
 		ring[i].summary =
 			(struct iomoments_summary)IOMOMENTS_SUMMARY_ZERO;
+		iomoments_topk_init(&ring[i].topk);
 		for (int j = 0; j < 100; j++) {
 			iomoments_summary_update(&ring[i].summary, 42.0);
 		}
@@ -633,6 +718,10 @@ int main(void)
 	test_carleman_green_on_gaussian();
 	test_carleman_amber_on_heavy_tail_spike();
 	test_carleman_yellow_on_constant_stream();
+	test_hill_green_on_light_tail();
+	test_hill_amber_on_heavy_tail();
+	test_hill_red_on_very_heavy_tail();
+	test_hill_yellow_on_empty_topk();
 	test_hankel_green_on_gaussian();
 	test_hankel_amber_on_two_atom_distribution();
 	test_hankel_amber_on_heavy_tail_spike();
