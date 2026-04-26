@@ -60,9 +60,22 @@
  *                              its own (α ≤ 1 → mean doesn't
  *                              exist for a stationary measure,
  *                              moments are the wrong primitive)
+ *  11. jb_normality           — Jarque-Bera (1980) test against
+ *                              the Gaussian; p = exp(−JB/2) under
+ *                              χ²(2). Bands H₀ rejection.
+ *  12. edgeworth_pdf_consistency — minimum of the truncated-
+ *                              Edgeworth correction factor on a
+ *                              standardized z-grid. Negative
+ *                              minimum ⇒ moment-implied PDF is
+ *                              not a valid density.
  *
- * Future evaluators (separate commits) named in D007:
- *   - KS goodness-of-fit to log-normal (needs empirical CDF)
+ * Project history note (2026-04-25): A KS goodness-of-fit signal
+ * built on a per-CPU log2-spaced histogram was prototyped and
+ * rejected. The histogram violated the moments-only project
+ * identity (and separately blew the BPF verifier budget on 6.12).
+ * jb_normality and edgeworth_pdf_consistency cover the
+ * "is this moment sequence Gaussian-like / does it imply a valid
+ * PDF" questions natively from m1..m4, with no in-kernel buffer.
  *
  * Userspace-only — uses doubles. Header-only by convention.
  */
@@ -486,6 +499,175 @@ iomoments_verdict_eval_hankel(const struct iomoments_summary *global,
 }
 
 /*
+ * Jarque-Bera (1980) normality test.
+ *
+ *   JB = n/6 · ( γ₁² + γ₂²/4 )
+ *
+ * where γ₁ = skewness and γ₂ = excess kurtosis. Under H₀ (sample
+ * drawn from a Gaussian), JB → χ²(2) asymptotically. The χ²(2)
+ * survival function is conveniently exp(−x/2), giving:
+ *
+ *   p = exp(−JB / 2)
+ *
+ * Bands:
+ *   p > 0.05    → GREEN  (consistent with Gaussian — no rejection)
+ *   0.001..0.05 → YELLOW (mild non-normality; moments are still a
+ *                          reasonable summary but not a Gaussian one)
+ *   p ≤ 0.001   → AMBER  (strongly non-Gaussian; quoting Gaussian-
+ *                          interpretation statistics like Cornish-
+ *                          Fisher quantiles is unsafe)
+ *
+ * The asymptotic distribution requires n ≳ 30 to be trustworthy;
+ * below n = 8 we emit YELLOW with an insufficient-data rationale
+ * rather than report a misleading p-value.
+ *
+ * Note: this signal answers a *different* question than the
+ * other moments-self-consistency signals. Hankel/Carleman ask
+ * "is the moment sequence valid / determinate?"; Hill asks "is
+ * the tail too heavy for a finite-mean distribution?"; JB asks
+ * "are the moments specifically *Gaussian-like*?" A workload can
+ * score GREEN on the first three (well-conditioned, light-tailed,
+ * determinate) yet AMBER on JB (e.g., tightly clustered around two
+ * modes — moments exist and are well-behaved, but Gaussian-
+ * interpretation breaks).
+ */
+static inline void
+iomoments_verdict_eval_jb(const struct iomoments_summary *global,
+			  struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (global->n < 8 || global->m2 <= 0.0) {
+		snprintf(r, sizeof(r),
+			 "n=%lu, m_2=%.3g; below JB asymptotic-validity floor",
+			 (unsigned long)global->n, global->m2);
+		iomoments_verdict_push(v, "jb_normality",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double skew = iomoments_summary_skewness(global);
+	double exkurt = iomoments_summary_excess_kurtosis(global);
+	double n = (double)global->n;
+	double jb = n / 6.0 * (skew * skew + exkurt * exkurt / 4.0);
+	double p = exp(-jb / 2.0);
+	enum iomoments_verdict_status status;
+	if (p > 0.05) {
+		status = IOMOMENTS_VERDICT_GREEN;
+	} else if (p > 0.001) {
+		status = IOMOMENTS_VERDICT_YELLOW;
+	} else {
+		status = IOMOMENTS_VERDICT_AMBER;
+	}
+	snprintf(r, sizeof(r), "JB=%.2f, p=%.3g (γ₁=%+.2f, γ₂=%+.2f, n=%lu)",
+		 jb, p, skew, exkurt, (unsigned long)global->n);
+	iomoments_verdict_push(v, "jb_normality", status, r);
+}
+
+/*
+ * Edgeworth-residual PDF-consistency signal.
+ *
+ * The Edgeworth series expresses a distribution near a Gaussian
+ * reference using cumulants. Truncated at the m4-available terms:
+ *
+ *   f(z) ≈ φ(z) · [ 1
+ *                + (γ₁/6)·H₃(z)
+ *                + (γ₂/24)·H₄(z)
+ *                + (γ₁²/72)·H₆(z) ]
+ *
+ * where φ(z) = standard normal PDF, H_n = probabilist's Hermite
+ * polynomial of degree n:
+ *
+ *   H₃(z) = z³ − 3z
+ *   H₄(z) = z⁴ − 6z² + 3
+ *   H₆(z) = z⁶ − 15z⁴ + 45z² − 15
+ *
+ * φ(z) is positive everywhere; the bracketed factor is a
+ * polynomial in z whose coefficients are functions of (γ₁, γ₂).
+ * For Gaussian data γ₁ = γ₂ = 0, the bracket is identically 1,
+ * the truncated PDF is exactly φ, and stays positive. As skewness
+ * and kurtosis grow, the polynomial corrections can drive the
+ * bracket negative on the tails. When that happens the moment-
+ * truncated reconstruction is *not a valid probability density* —
+ * a self-consistency violation distinct from the moment-sequence
+ * realizability that Hankel checks.
+ *
+ * Implementation: evaluate the bracket on a grid of standardized
+ * z values across [-5, 5] (about 1e-6 of total Gaussian mass
+ * outside that band, irrelevant for the band decision), track
+ * the minimum value.
+ *
+ * Bands (this signal is naturally binary — a PDF is either
+ * everywhere-positive or it isn't):
+ *
+ *   min > 0   → GREEN  (truncated PDF is positive across the grid;
+ *                        the moment-implied reconstruction is a
+ *                        valid density)
+ *   min ≤ 0   → AMBER  (truncated PDF goes negative somewhere; the
+ *                        moment-implied reconstruction is *not* a
+ *                        valid density — γ₁ and γ₂ are too extreme
+ *                        for the m1/m2 baseline they sit on)
+ *
+ * YELLOW is reserved for insufficient-data (n < 8 or m₂ ≤ 0).
+ *
+ * Note on tails: at large |z| the Hermite polynomials grow fast;
+ * the bracketed factor can drop well below 1 even on near-Gaussian
+ * data. That's *not* a violation — factor ∈ (0, 1) just means the
+ * moment-implied PDF is *smaller* than the Gaussian baseline at
+ * those points, which is a perfectly valid density behavior. Only
+ * factor ≤ 0 indicates an actual PDF-validity failure.
+ *
+ * Doesn't go RED on its own. Coverage of the genuinely-pathological
+ * cases is split: Hill RED-flags too-heavy tail, kurtosis_sanity
+ * RED-flags degenerate spike. Edgeworth's contribution is a
+ * specifically-PDF-reconstruction-aware AMBER for "the moments
+ * disagree with each other to the point of producing an invalid
+ * PDF when reconstructed."
+ */
+static inline void
+iomoments_verdict_eval_edgeworth(const struct iomoments_summary *global,
+				 struct iomoments_verdict *v)
+{
+	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (global->n < 8 || global->m2 <= 0.0) {
+		snprintf(r, sizeof(r),
+			 "n=%lu, m_2=%.3g; cannot standardize for Edgeworth",
+			 (unsigned long)global->n, global->m2);
+		iomoments_verdict_push(v, "edgeworth_pdf_consistency",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double skew = iomoments_summary_skewness(global);
+	double exkurt = iomoments_summary_excess_kurtosis(global);
+	double min_factor = 1.0;
+	double z_at_min = 0.0;
+	/* 201-point grid across [-5, 5] — fine enough that the polynomial
+	 * factor's minimum is captured to <1% even at high γ₁, γ₂ where
+	 * the polynomial varies fastest. */
+	for (int i = 0; i <= 200; i++) {
+		double z = -5.0 + 0.05 * (double)i;
+		double z2 = z * z;
+		double z3 = z2 * z;
+		double z4 = z2 * z2;
+		double z6 = z4 * z2;
+		double h3 = z3 - 3.0 * z;
+		double h4 = z4 - 6.0 * z2 + 3.0;
+		double h6 = z6 - 15.0 * z4 + 45.0 * z2 - 15.0;
+		double factor = 1.0 + skew / 6.0 * h3 + exkurt / 24.0 * h4 +
+				skew * skew / 72.0 * h6;
+		if (factor < min_factor) {
+			min_factor = factor;
+			z_at_min = z;
+		}
+	}
+	enum iomoments_verdict_status status =
+		min_factor > 0.0 ? IOMOMENTS_VERDICT_GREEN
+				 : IOMOMENTS_VERDICT_AMBER;
+	snprintf(r, sizeof(r),
+		 "Edgeworth min factor %.3f at z=%+.2f (γ₁=%+.2f, γ₂=%+.2f)",
+		 min_factor, z_at_min, skew, exkurt);
+	iomoments_verdict_push(v, "edgeworth_pdf_consistency", status, r);
+}
+
+/*
  * Spectral-flatness sweep signal. Reads the precomputed
  * iomoments_spectral_result (see iomoments_spectral.h) and emits
  * GREEN/YELLOW/AMBER based on the minimum variance ratio across
@@ -671,6 +853,8 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 	iomoments_verdict_eval_kurtosis_sanity(global, out);
 	iomoments_verdict_eval_carleman(global, out);
 	iomoments_verdict_eval_hankel(global, out);
+	iomoments_verdict_eval_jb(global, out);
+	iomoments_verdict_eval_edgeworth(global, out);
 	iomoments_verdict_eval_hill(&global_topk, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);

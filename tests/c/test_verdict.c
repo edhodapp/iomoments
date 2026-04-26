@@ -276,6 +276,95 @@ static void test_hankel_yellow_on_constant_stream(void)
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
 }
 
+/* --- Jarque-Bera signal ---------------------------------------------- */
+
+static void test_jb_green_on_gaussian(void)
+{
+	/* Gaussian: skewness ≈ 0, excess kurtosis ≈ 0. JB statistic ≈ 0,
+	 * χ²(2) p-value ≈ 1 → comfortably non-rejection of normality. */
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_jb(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
+}
+
+static void test_jb_amber_on_strong_skew(void)
+{
+	/* Mostly small + a single extreme outlier → very large skew &
+	 * kurtosis → JB statistic blows up → p-value vanishes →
+	 * AMBER. */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 999; i++) {
+		iomoments_summary_update(&g, 1000.0 + (i % 7));
+	}
+	iomoments_summary_update(&g, 100000.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_jb(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_jb_yellow_on_low_n(void)
+{
+	/* Below the JB asymptotic-validity threshold → YELLOW with
+	 * insufficient-data rationale (don't claim non-normality on
+	 * 10 samples). */
+	struct iomoments_summary g;
+	build_normal_global(&g, 6, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_jb(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
+/* --- Edgeworth-residual signal --------------------------------------- */
+
+static void test_edgeworth_green_on_gaussian(void)
+{
+	/* Gaussian: skewness ≈ 0, excess kurtosis ≈ 0 → truncated
+	 * Edgeworth correction factor is ≈ 1 everywhere → PDF stays
+	 * positive across the grid → GREEN. */
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_edgeworth(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
+}
+
+static void test_edgeworth_amber_on_extreme_kurtosis(void)
+{
+	/* Spike fixture: large excess kurtosis → Hermite-polynomial
+	 * correction overshoots negative on the tails → truncated PDF
+	 * goes negative → AMBER (moment-implied PDF is not a valid
+	 * density). */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 999; i++) {
+		iomoments_summary_update(&g, 1000.0 + (i % 5));
+	}
+	iomoments_summary_update(&g, 100000.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_edgeworth(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
+}
+
+static void test_edgeworth_yellow_on_constant_stream(void)
+{
+	/* m_2 = 0 → cannot standardize → YELLOW (variance_sanity covers
+	 * the RED case separately). */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 1000; i++) {
+		iomoments_summary_update(&g, 42.0);
+	}
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_edgeworth(&g, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
 /* --- Nyquist + autocorr signals (synthetic Level-2 results) ----------- */
 
 static void test_nyquist_green_on_high_confidence(void)
@@ -726,6 +815,12 @@ int main(void)
 	test_hankel_amber_on_two_atom_distribution();
 	test_hankel_amber_on_heavy_tail_spike();
 	test_hankel_yellow_on_constant_stream();
+	test_jb_green_on_gaussian();
+	test_jb_amber_on_strong_skew();
+	test_jb_yellow_on_low_n();
+	test_edgeworth_green_on_gaussian();
+	test_edgeworth_amber_on_extreme_kurtosis();
+	test_edgeworth_yellow_on_constant_stream();
 	test_nyquist_green_on_high_confidence();
 	test_nyquist_amber_on_low_confidence();
 	test_autocorr_amber_on_strong_periodicity();
