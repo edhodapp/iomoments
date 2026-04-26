@@ -191,11 +191,22 @@ iomoments_summary_bpf_update(struct iomoments_summary_bpf *s, iomoments_u64 x)
 	iomoments_s64 delta_post_int = delta_post_fp >> IOMOMENTS_BPF_FRAC_BITS;
 	iomoments_s64 delta_sq = delta_int * delta_int; /* ≥ 0, fits s64 */
 
-	/* Snapshot OLD m2, m3 — m4 update reads both, m3 update reads m2. */
+	/* Snapshot OLD m2 — m3 update reads it. (m4 path also snapshots
+	 * OLD m3 internally; gated below.) */
 	iomoments_s64 m2_old = s->m2;
+#if !defined(IOMOMENTS_BPF_K3_ONLY)
 	struct s128 m3_old = s->m3;
 
-	/* === m4 update ============================================ */
+	/* === m4 update ============================================
+	 *
+	 * Skipped under IOMOMENTS_BPF_K3_ONLY=1 (D014 fallback variant
+	 * for kernels with verifier complexity stricter than 6.12 —
+	 * 6.17+). s->m4 stays at its initial zero value forever; the
+	 * userspace verdict layer detects this via the `order`
+	 * parameter passed to verdict_compute and reports m4-dependent
+	 * signals as YELLOW with insufficient-moment-order rationale
+	 * rather than silently computing nonsense from m4=0. See D014.
+	 */
 	struct s128 m4_inc = s128_zero();
 
 	/* Term 1: δ⁴·n_old·(n²-3n+3)/n³.
@@ -230,6 +241,7 @@ iomoments_summary_bpf_update(struct iomoments_summary_bpf *s, iomoments_u64 x)
 	}
 
 	s->m4 = s128_add(s->m4, m4_inc);
+#endif /* !IOMOMENTS_BPF_K3_ONLY */
 
 	/* === m3 update (uses OLD m2) ============================== */
 	struct s128 m3_inc = s128_zero();

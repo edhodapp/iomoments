@@ -91,6 +91,13 @@
 #include "pebay_bpf.h"
 
 #define IOMOMENTS_BPF_OBJECT "build/iomoments.bpf.o"
+/*
+ * k=3 fallback per D014 / #48 — drops the m4 update body so the
+ * program fits stricter verifier budgets (6.17+). Tried only when
+ * the default k=4 object fails to load. The verdict layer reads
+ * `loaded_order` to YELLOW the m4-dependent signals.
+ */
+#define IOMOMENTS_BPF_OBJECT_K3 "build/iomoments-k3.bpf.o"
 #define IOMOMENTS_MAP_NAME "iomoments_summary"
 #define IOMOMENTS_TOPK_MAP_NAME "iomoments_topk_map"
 #define IOMOMENTS_DEFAULT_DURATION 10
@@ -521,6 +528,13 @@ int main(int argc, char **argv)
 	signal(SIGINT, stop_handler);
 	signal(SIGTERM, stop_handler);
 
+	/* Try the k=4 default first; on verifier rejection (-E2BIG or
+	 * EINVAL — both indicate the verifier didn't accept the
+	 * program) fall back to k=3 per D014. Other failures (EPERM
+	 * from missing CAP_BPF, ENOMEM, etc.) are NOT verifier
+	 * rejections — surface them directly rather than silently
+	 * retry against k=3 and produce a misleading aggregate error. */
+	enum iomoments_moment_order loaded_order = IOMOMENTS_MOMENT_ORDER_K4;
 	struct bpf_object *obj =
 		bpf_object__open_file(IOMOMENTS_BPF_OBJECT, NULL);
 	if (!obj) {
@@ -528,11 +542,42 @@ int main(int argc, char **argv)
 			IOMOMENTS_BPF_OBJECT, strerror(errno));
 		return 3;
 	}
-	if (bpf_object__load(obj) != 0) {
-		fprintf(stderr, "iomoments: bpf_object__load failed — need"
-				" CAP_BPF / CAP_PERFMON or root?\n");
+	int load_rc = bpf_object__load(obj);
+	if (load_rc != 0) {
+		int load_errno = -load_rc;
 		bpf_object__close(obj);
-		return 4;
+		obj = NULL;
+		if (load_errno == E2BIG || load_errno == EINVAL) {
+			fprintf(stderr,
+				"iomoments: k=4 variant rejected by verifier"
+				" (%s); falling back to k=3 (m4-dependent"
+				" signals will report YELLOW per D014).\n",
+				strerror(load_errno));
+			obj = bpf_object__open_file(IOMOMENTS_BPF_OBJECT_K3,
+						    NULL);
+			if (!obj) {
+				fprintf(stderr,
+					"iomoments: bpf_object__open_file(%s):"
+					" %s\n",
+					IOMOMENTS_BPF_OBJECT_K3,
+					strerror(errno));
+				return 3;
+			}
+			if (bpf_object__load(obj) != 0) {
+				fprintf(stderr, "iomoments: k=3 fallback also"
+						" rejected; verifier may need a"
+						" future k=2 variant.\n");
+				bpf_object__close(obj);
+				return 4;
+			}
+			loaded_order = IOMOMENTS_MOMENT_ORDER_K3;
+		} else {
+			fprintf(stderr,
+				"iomoments: bpf_object__load failed: %s"
+				" (need CAP_BPF / CAP_PERFMON or root?)\n",
+				strerror(load_errno));
+			return 4;
+		}
 	}
 
 	/*
@@ -627,7 +672,7 @@ int main(int argc, char **argv)
 				 base_window_seconds, &spec);
 	struct iomoments_verdict verdict;
 	iomoments_verdict_compute(&global, window_ring, windows_count, &l2,
-				  &spec, &verdict);
+				  &spec, loaded_order, &verdict);
 	print_report(&global, duration, window_ms, windows_count, &l2, &spec,
 		     &verdict);
 

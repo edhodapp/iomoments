@@ -82,6 +82,12 @@ BUILD_DIR       := build
 C_TEST_BINS     := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_TEST_FAST_SOURCES))
 C_MC_BINS       := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_MC_SOURCES))
 BPF_OBJS        := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(BPF_SOURCES))
+# k=3 fallback variant (D014 / #48): drops m4 update body via
+# IOMOMENTS_BPF_K3_ONLY=1, fits stricter verifiers (6.17+) where the
+# default k=4 program exceeds the 1M-step budget. Userspace verdict
+# layer detects k=3 mode via the `order` parameter on verdict_compute
+# and YELLOW's m4-dependent signals.
+BPF_K3_OBJS     := $(patsubst src/%.bpf.c,$(BUILD_DIR)/%-k3.bpf.o,$(BPF_SOURCES))
 
 CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 
@@ -297,7 +303,12 @@ fmt-check:
 $(BUILD_DIR)/%.bpf.o: src/%.bpf.c | $(BUILD_DIR)
 	$(CC_CLANG) $(CFLAGS_LINT_BPF) -g -c $< -o $@
 
-bpf-compile: $(BPF_OBJS)
+# k=3 variant — same source, IOMOMENTS_BPF_K3_ONLY=1 drops the m4
+# update body so the resulting program fits stricter verifier budgets.
+$(BUILD_DIR)/%-k3.bpf.o: src/%.bpf.c | $(BUILD_DIR)
+	$(CC_CLANG) $(CFLAGS_LINT_BPF) -DIOMOMENTS_BPF_K3_ONLY=1 -g -c $< -o $@
+
+bpf-compile: $(BPF_OBJS) $(BPF_K3_OBJS)
 
 # ---------------------------------------------------------------------------
 # Userspace iomoments binary — links libbpf + libelf + libz. Depends on

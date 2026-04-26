@@ -155,7 +155,8 @@ static void test_kurtosis_sanity_green_on_normal(void)
 	build_normal_global(&g, 5000, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_kurtosis_sanity(&g, &v);
+	iomoments_verdict_eval_kurtosis_sanity(&g, IOMOMENTS_MOMENT_ORDER_K4,
+					       &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -170,7 +171,8 @@ static void test_kurtosis_sanity_red_on_degenerate_spike(void)
 	iomoments_summary_update(&g, 100000.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_kurtosis_sanity(&g, &v);
+	iomoments_verdict_eval_kurtosis_sanity(&g, IOMOMENTS_MOMENT_ORDER_K4,
+					       &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_RED);
 }
 
@@ -185,7 +187,7 @@ static void test_carleman_green_on_gaussian(void)
 	build_normal_global(&g, 5000, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_carleman(&g, &v);
+	iomoments_verdict_eval_carleman(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -200,7 +202,7 @@ static void test_carleman_amber_on_heavy_tail_spike(void)
 	iomoments_summary_update(&g, 100000.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_carleman(&g, &v);
+	iomoments_verdict_eval_carleman(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
 }
 
@@ -214,7 +216,7 @@ static void test_carleman_yellow_on_constant_stream(void)
 	}
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_carleman(&g, &v);
+	iomoments_verdict_eval_carleman(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
 }
 
@@ -229,7 +231,7 @@ static void test_hankel_green_on_gaussian(void)
 	build_normal_global(&g, 5000, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_hankel(&g, &v);
+	iomoments_verdict_eval_hankel(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -244,7 +246,7 @@ static void test_hankel_amber_on_two_atom_distribution(void)
 	}
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_hankel(&g, &v);
+	iomoments_verdict_eval_hankel(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
 }
 
@@ -259,7 +261,7 @@ static void test_hankel_amber_on_heavy_tail_spike(void)
 	iomoments_summary_update(&g, 100000.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_hankel(&g, &v);
+	iomoments_verdict_eval_hankel(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
 }
 
@@ -273,7 +275,7 @@ static void test_hankel_yellow_on_constant_stream(void)
 	}
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_hankel(&g, &v);
+	iomoments_verdict_eval_hankel(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
 }
 
@@ -287,7 +289,7 @@ static void test_jb_green_on_gaussian(void)
 	build_normal_global(&g, 5000, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_jb(&g, &v);
+	iomoments_verdict_eval_jb(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -303,7 +305,7 @@ static void test_jb_amber_on_strong_skew(void)
 	iomoments_summary_update(&g, 100000.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_jb(&g, &v);
+	iomoments_verdict_eval_jb(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
 }
 
@@ -316,7 +318,7 @@ static void test_jb_yellow_on_low_n(void)
 	build_normal_global(&g, 6, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_jb(&g, &v);
+	iomoments_verdict_eval_jb(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
 }
 
@@ -331,7 +333,7 @@ static void test_edgeworth_green_on_gaussian(void)
 	build_normal_global(&g, 5000, 1000.0, 50.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_edgeworth(&g, &v);
+	iomoments_verdict_eval_edgeworth(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -348,7 +350,7 @@ static void test_edgeworth_amber_on_extreme_kurtosis(void)
 	iomoments_summary_update(&g, 100000.0);
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_edgeworth(&g, &v);
+	iomoments_verdict_eval_edgeworth(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_AMBER);
 }
 
@@ -362,8 +364,95 @@ static void test_edgeworth_yellow_on_constant_stream(void)
 	}
 	struct iomoments_verdict v;
 	memset(&v, 0, sizeof(v));
-	iomoments_verdict_eval_edgeworth(&g, &v);
+	iomoments_verdict_eval_edgeworth(&g, IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+}
+
+/* --- k=3 fallback behavior (D014) --------------------------------------
+ *
+ * On stricter verifiers (6.17+) the BPF program may load with the k=3
+ * variant which doesn't maintain m4. Userspace must report m4-dependent
+ * signals as YELLOW with insufficient-moment-order rationale rather than
+ * compute nonsense from m4=0. These tests pin that contract on each of
+ * the 5 m4-dependent evaluators (kurtosis_sanity, carleman, hankel, jb,
+ * edgeworth). Fixture: a healthy Gaussian summary with m4 explicitly
+ * zeroed — simulating what the k=3 BPF variant would write.
+ */
+
+static void test_k3_kurtosis_sanity_yellow_insufficient_order(void)
+{
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	g.m4 = 0.0;
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_kurtosis_sanity(&g, IOMOMENTS_MOMENT_ORDER_K3,
+					       &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+	CHECK(strstr(v.signals[0].rationale, "moment-order") != NULL);
+}
+
+static void test_k3_carleman_yellow_insufficient_order(void)
+{
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	g.m4 = 0.0;
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_carleman(&g, IOMOMENTS_MOMENT_ORDER_K3, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+	CHECK(strstr(v.signals[0].rationale, "moment-order") != NULL);
+}
+
+static void test_k3_hankel_yellow_insufficient_order(void)
+{
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	g.m4 = 0.0;
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_hankel(&g, IOMOMENTS_MOMENT_ORDER_K3, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+	CHECK(strstr(v.signals[0].rationale, "moment-order") != NULL);
+}
+
+static void test_k3_jb_yellow_insufficient_order(void)
+{
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	g.m4 = 0.0;
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_jb(&g, IOMOMENTS_MOMENT_ORDER_K3, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+	CHECK(strstr(v.signals[0].rationale, "moment-order") != NULL);
+}
+
+static void test_k3_edgeworth_yellow_insufficient_order(void)
+{
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	g.m4 = 0.0;
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_edgeworth(&g, IOMOMENTS_MOMENT_ORDER_K3, &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_YELLOW);
+	CHECK(strstr(v.signals[0].rationale, "moment-order") != NULL);
+}
+
+static void test_k4_evaluators_unchanged_when_order_is_k4(void)
+{
+	/* Sanity: when order=K4, the eval functions take the normal
+	 * computation path and produce the same result as before the
+	 * parameter was added. Spot-check kurtosis_sanity on a Gaussian
+	 * fixture lands GREEN. */
+	struct iomoments_summary g;
+	build_normal_global(&g, 5000, 1000.0, 50.0);
+	struct iomoments_verdict v;
+	memset(&v, 0, sizeof(v));
+	iomoments_verdict_eval_kurtosis_sanity(&g, IOMOMENTS_MOMENT_ORDER_K4,
+					       &v);
+	CHECK(v.signals[0].status == IOMOMENTS_VERDICT_GREEN);
 }
 
 /* --- Nyquist + autocorr signals (synthetic Level-2 results) ----------- */
@@ -771,7 +860,8 @@ static void test_red_overall_propagates_from_constant_stream(void)
 	struct iomoments_spectral_result spec;
 	iomoments_spectral_sweep(ring, 16, &g, 0.1, &spec);
 	struct iomoments_verdict v;
-	iomoments_verdict_compute(&g, ring, 16, &l2, &spec, &v);
+	iomoments_verdict_compute(&g, ring, 16, &l2, &spec,
+				  IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.overall == IOMOMENTS_VERDICT_RED);
 }
 
@@ -791,7 +881,8 @@ static void test_e2e_stationary_should_be_green(void)
 	struct iomoments_verdict v;
 	struct iomoments_spectral_result spec;
 	iomoments_spectral_sweep(ring, 64, &global, 0.1, &spec);
-	iomoments_verdict_compute(&global, ring, 64, &l2, &spec, &v);
+	iomoments_verdict_compute(&global, ring, 64, &l2, &spec,
+				  IOMOMENTS_MOMENT_ORDER_K4, &v);
 	CHECK(v.overall == IOMOMENTS_VERDICT_GREEN);
 }
 
@@ -822,6 +913,12 @@ int main(void)
 	test_edgeworth_green_on_gaussian();
 	test_edgeworth_amber_on_extreme_kurtosis();
 	test_edgeworth_yellow_on_constant_stream();
+	test_k3_kurtosis_sanity_yellow_insufficient_order();
+	test_k3_carleman_yellow_insufficient_order();
+	test_k3_hankel_yellow_insufficient_order();
+	test_k3_jb_yellow_insufficient_order();
+	test_k3_edgeworth_yellow_insufficient_order();
+	test_k4_evaluators_unchanged_when_order_is_k4();
 	test_nyquist_green_on_high_confidence();
 	test_nyquist_amber_on_low_confidence();
 	test_autocorr_amber_on_strong_periodicity();

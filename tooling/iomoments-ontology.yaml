@@ -131,17 +131,22 @@ diagnostic_signals:
       green: "ratio > 0.5 (light tail; consistent with divergent S)"
       yellow: "ratio in (0.3, 0.5] (moderate tail; caveat user)"
       amber: "ratio <= 0.3 (heavy tail; possible moment-indeterminacy)"
+
     rationale: >
       D007 thesis; Carleman 1926 classical result. With only k=4
       moments the signal is a partial-sum proxy, not a definitive
       determinacy test. Doesn't go RED on its own — kurtosis_sanity
-      already RED-flags degenerate spikes.
+      already RED-flags degenerate spikes. Per D014, when the
+      loaded BPF variant is k=3 (m4 not maintained), the evaluator
+      reports YELLOW with insufficient-moment-order rationale
+      rather than computing nonsense from m4=0.
     implementation_refs:
       - "src/iomoments_verdict.h:iomoments_verdict_eval_carleman"
     verification_refs:
       - "tests/c/test_verdict.c:test_carleman_green_on_gaussian"
       - "tests/c/test_verdict.c:test_carleman_amber_on_heavy_tail_spike"
       - "tests/c/test_verdict.c:test_carleman_yellow_on_constant_stream"
+      - "tests/c/test_verdict.c:test_k3_carleman_yellow_insufficient_order"
     status: tested
 
   - name: hankel_condition_number
@@ -160,11 +165,15 @@ diagnostic_signals:
       green: "kappa > 0.5 (well-conditioned; supports continuous)"
       yellow: "kappa in (0.1, 0.5] (constrained shape)"
       amber: "kappa <= 0.1 OR kappa > 100 (rank-deficient OR pathological)"
+
     rationale: >
       D007 thesis; Curto & Fialkow 1991. Determinant proxy chosen
       over full eigenvalue computation because all the inputs are
       already on hand and the determinant has a clean closed form
-      at k=4.
+      at k=4. Per D014, when the loaded BPF variant is k=3 (m4
+      not maintained), the evaluator reports YELLOW with
+      insufficient-moment-order rationale rather than computing a
+      meaningless determinant from m4=0.
     implementation_refs:
       - "src/iomoments_verdict.h:iomoments_verdict_eval_hankel"
     verification_refs:
@@ -172,6 +181,7 @@ diagnostic_signals:
       - "tests/c/test_verdict.c:test_hankel_amber_on_two_atom_distribution"
       - "tests/c/test_verdict.c:test_hankel_amber_on_heavy_tail_spike"
       - "tests/c/test_verdict.c:test_hankel_yellow_on_constant_stream"
+      - "tests/c/test_verdict.c:test_k3_hankel_yellow_insufficient_order"
     status: tested
 
   - name: hill_tail_index
@@ -233,6 +243,7 @@ diagnostic_signals:
       green: "p > 0.05 (consistent with Gaussian)"
       yellow: "0.001 < p <= 0.05 (mild non-normality)"
       amber: "p <= 0.001 (strongly non-Gaussian; Cornish-Fisher unsafe)"
+
     rationale: >
       D007 thesis; Jarque & Bera 1980. Replaces the originally-spec'd
       ks_lognormal_pvalue signal. The histogram-based KS path was
@@ -241,13 +252,17 @@ diagnostic_signals:
       question (does the distribution match a reference family?)
       using only m1..m4. Below n = 8 the asymptotic chi^2(2)
       approximation is unreliable; emit YELLOW with insufficient-
-      data rationale rather than a misleading p-value.
+      data rationale rather than a misleading p-value. Per D014,
+      when the loaded BPF variant is k=3 (m4 not maintained), the
+      evaluator reports YELLOW with insufficient-moment-order
+      rationale.
     implementation_refs:
       - "src/iomoments_verdict.h:iomoments_verdict_eval_jb"
     verification_refs:
       - "tests/c/test_verdict.c:test_jb_green_on_gaussian"
       - "tests/c/test_verdict.c:test_jb_amber_on_strong_skew"
       - "tests/c/test_verdict.c:test_jb_yellow_on_low_n"
+      - "tests/c/test_verdict.c:test_k3_jb_yellow_insufficient_order"
     status: tested
 
   - name: edgeworth_pdf_consistency
@@ -280,6 +295,7 @@ diagnostic_signals:
       green: "min factor > 0 (truncated PDF is everywhere positive)"
       amber: "min factor ≤ 0 (truncated PDF goes negative; reconstruction invalid)"
       yellow: "n < 8 OR m_2 ≤ 0 (cannot standardize)"
+
     rationale: >
       D007 thesis; Edgeworth 1905; complements Hankel-conditioning
       from a different angle. Hankel asks whether *some* measure has
@@ -287,13 +303,18 @@ diagnostic_signals:
       truncated reconstruction is itself a valid density. Both
       questions are asked at every drain from the same running
       m1..m4. No YELLOW band on a successful evaluation: a PDF is
-      either valid or it isn't.
+      either valid or it isn't. Per D014, when the loaded BPF
+      variant is k=3 (m4 not maintained), the evaluator reports
+      YELLOW with insufficient-moment-order rationale; the
+      Hermite H_4 / H_6 corrections are unconstrained without m4
+      so PDF reconstruction has no meaning.
     implementation_refs:
       - "src/iomoments_verdict.h:iomoments_verdict_eval_edgeworth"
     verification_refs:
       - "tests/c/test_verdict.c:test_edgeworth_green_on_gaussian"
       - "tests/c/test_verdict.c:test_edgeworth_amber_on_extreme_kurtosis"
       - "tests/c/test_verdict.c:test_edgeworth_yellow_on_constant_stream"
+      - "tests/c/test_verdict.c:test_k3_edgeworth_yellow_insufficient_order"
     status: tested
 
   - name: half_split_moment_stability

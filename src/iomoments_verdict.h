@@ -101,6 +101,25 @@ enum iomoments_verdict_status {
 	IOMOMENTS_VERDICT_RED = 3,
 };
 
+/*
+ * Moment order — how many central moments the BPF program is
+ * actually maintaining. The userspace verdict layer uses this to
+ * gate signals that require higher-order moments. Per D014, the
+ * default BPF variant maintains k=4 across all currently-supported
+ * kernels (5.15-6.12); the k=3 fallback variant (in development)
+ * targets stricter verifiers (6.17+) by dropping the m4 update
+ * body. Userspace callers MUST pass the order matching the
+ * variant they loaded; m4-dependent signals (kurtosis_sanity,
+ * carleman, hankel, jb_normality, edgeworth_pdf_consistency)
+ * report YELLOW with insufficient-moment-order rationale when
+ * order < K4, rather than computing nonsense from m4=0.
+ */
+enum iomoments_moment_order {
+	IOMOMENTS_MOMENT_ORDER_K2 = 2, /* mean + variance only (future) */
+	IOMOMENTS_MOMENT_ORDER_K3 = 3, /* + skewness */
+	IOMOMENTS_MOMENT_ORDER_K4 = 4, /* + excess kurtosis (current default) */
+};
+
 #define IOMOMENTS_VERDICT_RATIONALE_MAX 192
 #define IOMOMENTS_VERDICT_MAX_SIGNALS 12
 
@@ -209,10 +228,20 @@ iomoments_verdict_eval_variance_sanity(const struct iomoments_summary *global,
 
 static inline void
 iomoments_verdict_eval_kurtosis_sanity(const struct iomoments_summary *global,
+				       enum iomoments_moment_order order,
 				       struct iomoments_verdict *v)
 {
-	double k = iomoments_summary_excess_kurtosis(global);
 	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (order < IOMOMENTS_MOMENT_ORDER_K4) {
+		snprintf(r, sizeof(r),
+			 "moment-order=k%d; m4 not maintained on this kernel"
+			 " (D014 fallback)",
+			 (int)order);
+		iomoments_verdict_push(v, "kurtosis_sanity",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
+	double k = iomoments_summary_excess_kurtosis(global);
 	/* Excess kurtosis > 12 indicates very heavy tails (Gaussian = 0,
 	 * exponential = 6, log-normal-ish = up to ~10). Above 12 the
 	 * moment-based summary is increasingly unrepresentative of the
@@ -369,9 +398,19 @@ iomoments_verdict_eval_autocorr(const struct iomoments_level2_result *l2,
  */
 static inline void
 iomoments_verdict_eval_carleman(const struct iomoments_summary *global,
+				enum iomoments_moment_order order,
 				struct iomoments_verdict *v)
 {
 	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (order < IOMOMENTS_MOMENT_ORDER_K4) {
+		snprintf(r, sizeof(r),
+			 "moment-order=k%d; m4 not maintained on this kernel"
+			 " (D014 fallback)",
+			 (int)order);
+		iomoments_verdict_push(v, "carleman_partial_sum",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
 	if (global->n == 0 || global->m2 <= 0.0 || global->m4 <= 0.0) {
 		snprintf(r, sizeof(r),
 			 "n=%lu, m2=%.3g, m4=%.3g; cannot evaluate",
@@ -457,9 +496,19 @@ iomoments_verdict_eval_carleman(const struct iomoments_summary *global,
  */
 static inline void
 iomoments_verdict_eval_hankel(const struct iomoments_summary *global,
+			      enum iomoments_moment_order order,
 			      struct iomoments_verdict *v)
 {
 	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (order < IOMOMENTS_MOMENT_ORDER_K4) {
+		snprintf(r, sizeof(r),
+			 "moment-order=k%d; m4 not maintained on this kernel"
+			 " (D014 fallback)",
+			 (int)order);
+		iomoments_verdict_push(v, "hankel_conditioning",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
 	if (global->n == 0 || global->m2 <= 0.0) {
 		snprintf(r, sizeof(r),
 			 "n=%lu, m_2=%.3g; cannot evaluate Hankel",
@@ -533,9 +582,19 @@ iomoments_verdict_eval_hankel(const struct iomoments_summary *global,
  */
 static inline void
 iomoments_verdict_eval_jb(const struct iomoments_summary *global,
+			  enum iomoments_moment_order order,
 			  struct iomoments_verdict *v)
 {
 	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (order < IOMOMENTS_MOMENT_ORDER_K4) {
+		snprintf(r, sizeof(r),
+			 "moment-order=k%d; m4 not maintained on this kernel"
+			 " (D014 fallback)",
+			 (int)order);
+		iomoments_verdict_push(v, "jb_normality",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
 	if (global->n < 8 || global->m2 <= 0.0) {
 		snprintf(r, sizeof(r),
 			 "n=%lu, m_2=%.3g; below JB asymptotic-validity floor",
@@ -642,9 +701,19 @@ iomoments_verdict_eval_jb(const struct iomoments_summary *global,
  */
 static inline void
 iomoments_verdict_eval_edgeworth(const struct iomoments_summary *global,
+				 enum iomoments_moment_order order,
 				 struct iomoments_verdict *v)
 {
 	char r[IOMOMENTS_VERDICT_RATIONALE_MAX];
+	if (order < IOMOMENTS_MOMENT_ORDER_K4) {
+		snprintf(r, sizeof(r),
+			 "moment-order=k%d; m4 not maintained on this kernel"
+			 " (D014 fallback)",
+			 (int)order);
+		iomoments_verdict_push(v, "edgeworth_pdf_consistency",
+				       IOMOMENTS_VERDICT_YELLOW, r);
+		return;
+	}
 	if (global->n < 8 || global->m2 <= 0.0) {
 		snprintf(r, sizeof(r),
 			 "n=%lu, m_2=%.3g; cannot standardize for Edgeworth",
@@ -855,6 +924,7 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 			  const struct iomoments_window *ring, size_t count,
 			  const struct iomoments_level2_result *l2,
 			  const struct iomoments_spectral_result *spec,
+			  enum iomoments_moment_order order,
 			  struct iomoments_verdict *out)
 {
 	memset(out, 0, sizeof(*out));
@@ -869,11 +939,11 @@ iomoments_verdict_compute(const struct iomoments_summary *global,
 
 	iomoments_verdict_eval_sample_count(global, out);
 	iomoments_verdict_eval_variance_sanity(global, out);
-	iomoments_verdict_eval_kurtosis_sanity(global, out);
-	iomoments_verdict_eval_carleman(global, out);
-	iomoments_verdict_eval_hankel(global, out);
-	iomoments_verdict_eval_jb(global, out);
-	iomoments_verdict_eval_edgeworth(global, out);
+	iomoments_verdict_eval_kurtosis_sanity(global, order, out);
+	iomoments_verdict_eval_carleman(global, order, out);
+	iomoments_verdict_eval_hankel(global, order, out);
+	iomoments_verdict_eval_jb(global, order, out);
+	iomoments_verdict_eval_edgeworth(global, order, out);
 	iomoments_verdict_eval_hill(&global_topk, out);
 	iomoments_verdict_eval_nyquist(l2, out);
 	iomoments_verdict_eval_autocorr(l2, out);
