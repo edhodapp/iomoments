@@ -71,14 +71,21 @@ BPF_SOURCES     := $(shell find src -maxdepth 2 -type f -name '*.bpf.c' 2>/dev/n
 C_TEST_SOURCES  := $(shell find tests/c -maxdepth 2 -type f -name '*.c' 2>/dev/null)
 C_ALL           := $(C_SOURCES) $(C_HEADERS) $(BPF_SOURCES) $(C_TEST_SOURCES)
 
+# Monte Carlo tests run separately from the deterministic gate
+# (`make test-mc`); excluded from C_TEST_BINS so `make test-c` stays
+# fast and false-positive-free.
+C_MC_SOURCES    := $(filter tests/c/test_mc.c,$(C_TEST_SOURCES))
+C_TEST_FAST_SOURCES := $(filter-out $(C_MC_SOURCES),$(C_TEST_SOURCES))
+
 # Build directory for compiled C test binaries + BPF objects.
 BUILD_DIR       := build
-C_TEST_BINS     := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_TEST_SOURCES))
+C_TEST_BINS     := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_TEST_FAST_SOURCES))
+C_MC_BINS       := $(patsubst tests/c/%.c,$(BUILD_DIR)/%,$(C_MC_SOURCES))
 BPF_OBJS        := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(BPF_SOURCES))
 
 CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 
-.PHONY: help venv install-hooks test test-c \
+.PHONY: help venv install-hooks test test-c test-mc \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
         lint-c-scanbuild fmt-check bpf-compile bpf-verify bpf-test-vm \
         bpf-test-vm-matrix iomoments-build \
@@ -149,6 +156,22 @@ test-c: $(C_TEST_BINS)
 		echo "(no C tests)"; \
 	else \
 		for bin in $(C_TEST_BINS); do \
+			echo "Running $$bin"; \
+			"$$bin" || exit 1; \
+		done; \
+	fi
+
+# Monte Carlo statistical tests — separate from `test-c` because
+# they're probabilistic (band-violation false alarms possible) and
+# slow (default 100 trials per fixture). Run periodically rather
+# than on every commit. Override trial count via
+# `IOMOMENTS_MC_TRIALS=<n> make test-mc`; pin a specific seed via
+# `IOMOMENTS_MC_SEED=0x<hex> make test-mc`.
+test-mc: $(C_MC_BINS)
+	@if [ -z "$(C_MC_BINS)" ]; then \
+		echo "(no MC tests)"; \
+	else \
+		for bin in $(C_MC_BINS); do \
 			echo "Running $$bin"; \
 			"$$bin" || exit 1; \
 		done; \
