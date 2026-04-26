@@ -563,6 +563,43 @@ static void test_overall_is_worst_of_all(void)
 	CHECK(v.overall == IOMOMENTS_VERDICT_RED);
 }
 
+/*
+ * Verifies the red_verdict_refuses_moment_emission constraint
+ * precondition: when the data triggers any RED signal,
+ * iomoments_verdict_compute promotes the overall to RED. The
+ * print_verdict path's "Moment-based summary refused" block fires
+ * on overall == RED — that's a userspace stdout effect not unit-
+ * testable here, but the precondition (overall reaches RED) is
+ * pinned by this test.
+ */
+static void test_red_overall_propagates_from_constant_stream(void)
+{
+	/* Constant stream of 1000 samples → variance_sanity = RED →
+	 * overall = RED. Build a window ring of 16 windows so
+	 * half_split has enough material to evaluate (rather than
+	 * returning YELLOW for too-few-windows). */
+	struct iomoments_summary g = IOMOMENTS_SUMMARY_ZERO;
+	for (int i = 0; i < 1000; i++) {
+		iomoments_summary_update(&g, 42.0);
+	}
+	struct iomoments_window ring[16];
+	for (size_t i = 0; i < 16; i++) {
+		ring[i].end_ts_ns = i * 100000000ULL;
+		ring[i].summary =
+			(struct iomoments_summary)IOMOMENTS_SUMMARY_ZERO;
+		for (int j = 0; j < 100; j++) {
+			iomoments_summary_update(&ring[i].summary, 42.0);
+		}
+	}
+	struct iomoments_level2_result l2;
+	iomoments_level2_analyze(ring, 16, &g, &l2);
+	struct iomoments_spectral_result spec;
+	iomoments_spectral_sweep(ring, 16, &g, 0.1, &spec);
+	struct iomoments_verdict v;
+	iomoments_verdict_compute(&g, ring, 16, &l2, &spec, &v);
+	CHECK(v.overall == IOMOMENTS_VERDICT_RED);
+}
+
 /* --- End-to-end on a clean stationary scenario ------------------------ */
 
 static void test_e2e_stationary_should_be_green(void)
@@ -611,6 +648,7 @@ int main(void)
 	test_half_split_amber_on_drift();
 	test_half_split_yellow_when_too_few();
 	test_overall_is_worst_of_all();
+	test_red_overall_propagates_from_constant_stream();
 	test_e2e_stationary_should_be_green();
 
 	if (failures > 0) {

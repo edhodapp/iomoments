@@ -121,15 +121,28 @@ diagnostic_signals:
       partial sums imply the moment problem is determinate and the
       moments uniquely characterize the distribution.
     method: >
-      S_n = sum_{k=1..n} m_{2k}^{-1/(2k)}. Carleman: S_infty = infty
-      implies determinacy. Truncated partial sum used in practice.
+      S_n = sum_{k=1..n} m_{2k}^{-1/(2k)}. iomoments tracks moments to
+      k=4; the implementation evaluates only the first two terms and
+      uses the *ratio* of term-2 to term-1 as a tail-weight proxy for
+      Carleman-series decay. Carleman: S_infty = infty implies
+      determinacy.
     unit: dimensionless
     thresholds:
-      green: "S_n diverges visibly before N samples exhausted"
-      yellow: "S_n grows slowly; determinacy unclear"
-      red: "S_n converges; moments do NOT uniquely determine distribution"
-    rationale: "D007 thesis; Carleman 1926 classical result."
-    status: spec
+      green: "ratio > 0.5 (light tail; consistent with divergent S)"
+      yellow: "ratio in (0.3, 0.5] (moderate tail; caveat user)"
+      amber: "ratio <= 0.3 (heavy tail; possible moment-indeterminacy)"
+    rationale: >
+      D007 thesis; Carleman 1926 classical result. With only k=4
+      moments the signal is a partial-sum proxy, not a definitive
+      determinacy test. Doesn't go RED on its own — kurtosis_sanity
+      already RED-flags degenerate spikes.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_carleman"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_carleman_green_on_gaussian"
+      - "tests/c/test_verdict.c:test_carleman_amber_on_heavy_tail_spike"
+      - "tests/c/test_verdict.c:test_carleman_yellow_on_constant_stream"
+    status: tested
 
   - name: hankel_condition_number
     description: >
@@ -137,15 +150,29 @@ diagnostic_signals:
       decomposition (Curto & Fialkow 1991). Ill-conditioned Hankel
       matrix implies the moment sequence is degenerate in practice.
     method: >
-      Condition number (spectral norm ratio) of H_n = [m_{i+j}]_{0<=i,j<=n}
-      over the observed moment vector.
+      iomoments tracks moments to k=4, so the implementation forms
+      the 3×3 central-moment Hankel and uses its determinant
+      normalized by mu_2^3 as a conditioning proxy:
+      kappa = (mu_2*mu_4 - mu_3^2 - mu_2^3) / mu_2^3.
+      Equivalent to (excess kurtosis + 2) - skewness^2.
     unit: dimensionless
     thresholds:
-      green: "cond(H_n) < 1e6"
-      yellow: "1e6 <= cond(H_n) < 1e10"
-      red: "cond(H_n) >= 1e10"
-    rationale: "D007 thesis; Curto & Fialkow 1991."
-    status: spec
+      green: "kappa > 0.5 (well-conditioned; supports continuous)"
+      yellow: "kappa in (0.1, 0.5] (constrained shape)"
+      amber: "kappa <= 0.1 OR kappa > 100 (rank-deficient OR pathological)"
+    rationale: >
+      D007 thesis; Curto & Fialkow 1991. Determinant proxy chosen
+      over full eigenvalue computation because all the inputs are
+      already on hand and the determinant has a clean closed form
+      at k=4.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_hankel"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_hankel_green_on_gaussian"
+      - "tests/c/test_verdict.c:test_hankel_amber_on_two_atom_distribution"
+      - "tests/c/test_verdict.c:test_hankel_amber_on_heavy_tail_spike"
+      - "tests/c/test_verdict.c:test_hankel_yellow_on_constant_stream"
+    status: tested
 
   - name: hill_tail_index
     description: >
@@ -195,14 +222,16 @@ diagnostic_signals:
       divergence implies non-stationarity or aliasing; small divergence
       bounds per-moment noise floor.
     method: >
-      Compute moments on each half; report relative delta per moment
-      order. Compare against Pébay theoretical noise floor for the
-      sample count.
-    unit: relative_delta
+      Split the iomoments_window ring at the midpoint, aggregate each
+      half via pebay.h's parallel-combine, compare. Two metrics
+      reported: mean_shift_in_sd (|m1_a - m1_b| / sqrt((var_a + var_b)/2))
+      and var_ratio (max(var_a, var_b) / min). Status driven by the
+      worst of the two.
+    unit: dimensionless
     thresholds:
-      green: "|delta_k| <= 2x theoretical noise floor, all k"
-      yellow: "|delta_k| in (2x, 5x) for any k"
-      amber: "|delta_k| > 5x for any k (non-stationarity suspected)"
+      green: "mean_shift < 0.5 sigma_pooled AND var_ratio <= 2"
+      yellow: "mean_shift in [0.5, 1] sigma_pooled OR var_ratio in (2, 4]"
+      amber: "mean_shift > 1 sigma_pooled OR var_ratio > 4"
     rationale: >
       D007 thesis; classic split-half reliability adapted. No red
       band because severe non-stationarity signals a measurement
@@ -211,7 +240,110 @@ diagnostic_signals:
       which is what the amber verdict's output_policy recommends.
       Red tier belongs to signals that prove moments don't exist
       (heavy tail, moment-indeterminate), not to measurement artifacts.
-    status: spec
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_half_split"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_half_split_green_on_stationary"
+      - "tests/c/test_verdict.c:test_half_split_amber_on_drift"
+      - "tests/c/test_verdict.c:test_half_split_yellow_when_too_few"
+    status: tested
+
+  - name: nyquist_confidence
+    description: >
+      Level 2 (D013) Nyquist-met confidence. Compares variance of the
+      windowed-mean stream Var(m1_i) to the CLT prediction
+      sigma^2_global / n_per_window. Aliasing or non-stationarity
+      drives the ratio away from 1; the confidence score is a
+      symmetric Gaussian-of-log-ratio in [0, 1].
+    method: >
+      confidence = exp( -1/2 * (log_2(Var_obs / Var_pred))^2 )
+      Value 1 at perfect agreement, ~0.6 at 2x deviation, ~0.14 at
+      4x, ~0.01 at 8x. Symmetric: dips and inflations are penalized
+      equally.
+    unit: dimensionless
+    thresholds:
+      green: "confidence >= 0.5"
+      yellow: "0.1 <= confidence < 0.5"
+      amber: "confidence < 0.1 (aliasing or strong non-stationarity)"
+    rationale: >
+      D013; the second-half-of-iomoments diagnostic. CLT divergence
+      is the structural signal — moments are honest only when the
+      windowed-mean stream has the variance the CLT predicts.
+    implementation_refs:
+      - "src/iomoments_level2.h:iomoments_level2_analyze"
+      - "src/iomoments_level2.h:iomoments_level2_confidence"
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_nyquist"
+    verification_refs:
+      - "tests/c/test_level2.c:test_confidence_function_calibration"
+      - "tests/c/test_level2.c:test_stationary_gaussian_high_confidence"
+      - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
+      - "tests/c/test_level2.c:test_aliased_periodic_low_confidence"
+      - "tests/c/test_verdict.c:test_nyquist_green_on_high_confidence"
+      - "tests/c/test_verdict.c:test_nyquist_amber_on_low_confidence"
+    status: tested
+
+  - name: autocorr_residual
+    description: >
+      Level 2 (D013) lag-k Pearson autocorrelation of the windowed-
+      mean time series at lags {1, 2, 4, 8}. For stationary Nyquist-
+      met data, all lag autocorrelations are ~0 within sampling
+      noise; persistent peaks at lag k indicate periodicity at
+      period k * W.
+    method: >
+      rho_k = mean((m1_i - mu)(m1_{i+k} - mu)) / Var(m1).
+      Signal status driven by max(|rho_k|) across the fixed lag set.
+    unit: dimensionless
+    thresholds:
+      green: "max(|rho_k|) <= 0.3"
+      yellow: "max(|rho_k|) in (0.3, 0.5]"
+      amber: "max(|rho_k|) > 0.5 (periodic structure at lag*W)"
+    rationale: >
+      D013 second-stage Pébay diagnostic; complements
+      nyquist_confidence by localizing the period when periodicity
+      is at exactly k*W for k in the fixed lag set.
+    implementation_refs:
+      - "src/iomoments_level2.h:iomoments_level2_autocorr"
+      - "src/iomoments_level2.h:iomoments_level2_analyze"
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_autocorr"
+    verification_refs:
+      - "tests/c/test_level2.c:test_stationary_gaussian_high_confidence"
+      - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
+      - "tests/c/test_verdict.c:test_autocorr_amber_on_strong_periodicity"
+      - "tests/c/test_verdict.c:test_autocorr_green_on_low_correlation"
+    status: tested
+
+  - name: spectral_flatness_sweep
+    description: >
+      Level 2 (D013) spectral-flatness sweep. Sweeps virtual window
+      length W' = k * W for k in {1, 2, 4, 8, ...}, re-aggregates the
+      base-window ring at each k, and computes Var(m1_virtual) /
+      Var_clt at each W'. The minimum ratio across the sweep + the
+      W' at which it occurred *localizes* hidden periodicity that
+      a single-W ratio cannot detect.
+    method: >
+      For each k, merge every k consecutive base snapshots into a
+      virtual window, compute Var across virtuals, compare to
+      sigma^2_global / n_per_virtual. The minimum ratio across the
+      sweep is the signal value; the corresponding W' is the
+      localized aliasing period.
+    unit: dimensionless
+    thresholds:
+      green: "min ratio > 0.5 (smooth across scales)"
+      yellow: "min ratio in (0.2, 0.5] (mild structure at some scale)"
+      amber: "min ratio <= 0.2 (clear aliasing at the W' of min)"
+    rationale: >
+      D013 fully realizes the moments-of-moments architecture;
+      spectral_flatness_sweep is the period-localization companion
+      to nyquist_confidence. Resolves the temporal_coherence_sidecar
+      open question.
+    implementation_refs:
+      - "src/iomoments_spectral.h:iomoments_spectral_sweep"
+      - "src/iomoments_verdict.h:iomoments_verdict_eval_spectral"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_spectral_sweep_stationary_smooth"
+      - "tests/c/test_verdict.c:test_spectral_sweep_sinusoid_at_period_4"
+      - "tests/c/test_verdict.c:test_spectral_sweep_insufficient_data"
+    status: tested
 
 # --- Verdict nodes (D007 four-way gate) ---------------------------------
 
@@ -228,8 +360,17 @@ verdict_nodes:
       - "ks_lognormal_pvalue: green OR yellow"
       - "half_split_moment_stability: green"
     output_policy: "Emit moments with computed error bounds."
-    rationale: "D007 green tier."
-    status: spec
+    rationale: >
+      D007 green tier. Implementation aggregation: overall =
+      worst-of-all signal statuses; GREEN requires every signal
+      green or yellow with the documented relaxation.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+      - "src/iomoments_verdict.h:iomoments_verdict_status_name"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_status_names"
+      - "tests/c/test_verdict.c:test_e2e_stationary_should_be_green"
+    status: tested
 
   - kind: yellow
     description: >
@@ -241,8 +382,18 @@ verdict_nodes:
     output_policy: >
       Emit moments with an explicit caveat naming the signal(s) that
       flagged marginal. Caller can proceed or escalate.
-    rationale: "D007 yellow tier."
-    status: spec
+    rationale: >
+      D007 yellow tier. iomoments_verdict_compute promotes overall
+      to YELLOW when any signal goes yellow and no signal is amber/red;
+      print_verdict displays the per-signal rationales so operators
+      see which signal(s) caveated.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+      - "src/iomoments_verdict.h:iomoments_verdict_push"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_overall_is_worst_of_all"
+      - "tests/c/test_verdict.c:test_sample_count_yellow_in_band"
+    status: tested
 
   - kind: amber
     description: >
@@ -252,27 +403,56 @@ verdict_nodes:
     entrance_criteria:
       - "half_split_moment_stability: amber"
       - "OR hill_tail_index: amber"
+      - "OR nyquist_confidence: amber (Level 2, D013)"
+      - "OR autocorr_residual: amber (Level 2)"
+      - "OR spectral_flatness_sweep: amber (Level 2 sweep)"
+      - "OR carleman_partial_sum: amber (heavy tail proxy)"
+      - "OR hankel_conditioning: amber (rank-deficient or pathological)"
     output_policy: >
       Emit moments with a diagnostic recommendation (widen window,
-      re-sample, partition the workload).
-    rationale: "D007 amber tier."
-    status: spec
+      re-sample, partition the workload). The localized period from
+      spectral_flatness_sweep is included when that signal fires.
+    rationale: >
+      D007 amber tier. Worst-of-all aggregation: any AMBER signal
+      promotes overall to AMBER. The print_verdict layer surfaces
+      every AMBER signal with its rationale string.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_overall_is_worst_of_all"
+      - "tests/c/test_verdict.c:test_half_split_amber_on_drift"
+    status: tested
 
   - kind: red
     description: >
       Moments are the wrong primitive for this workload. Typically
       this fires on heavy-tailed distributions where the variance or
-      higher moments do not exist in the population.
+      higher moments do not exist in the population, or on degenerate
+      streams (constant-value, near-zero variance).
     entrance_criteria:
       - "hill_tail_index: red"
-      - "OR carleman_partial_sum: red"
-      - "OR hankel_condition_number: red"
+      - "OR carleman_partial_sum: red (not currently emitted; reserved)"
+      - "OR hankel_condition_number: red (not currently emitted; reserved)"
       - "OR ks_lognormal_pvalue: red AND raw-space also rejected"
+      - "OR variance_sanity: red (constant stream)"
+      - "OR sample_count: red (insufficient n)"
+      - "OR kurtosis_sanity: red (degenerate spike)"
     output_policy: >
-      REFUSE moment-based summary. Recommend an alternative primitive
-      (DDSketch, HDR Histogram) appropriate to the workload's shape.
-    rationale: "D007 red tier — the honest infeasibility core."
-    status: spec
+      REFUSE moment-based summary. iomoments.c print_verdict emits a
+      Recommendation block pointing at DDSketch / HDR Histogram as
+      alternative primitives appropriate to the workload's shape.
+    rationale: >
+      D007 red tier — the honest infeasibility core. Multiple signals
+      can drive RED (each pinned to its specific failure mode); the
+      print path centralizes the alternative-tool recommendation.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+      - "src/iomoments.c:print_verdict"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_sample_count_red_when_too_few"
+      - "tests/c/test_verdict.c:test_variance_sanity_red_on_constant_stream"
+      - "tests/c/test_verdict.c:test_kurtosis_sanity_red_on_degenerate_spike"
+    status: tested
 
 # --- Domain constraints -------------------------------------------------
 
@@ -304,19 +484,39 @@ domain_constraints:
     description: >
       Every iomoments run emits a verdict. The verdict is NEVER
       silently elided, even when green — callers must be able to grep
-      for the verdict on every record.
+      for the verdict on every record. The print_report path always
+      calls print_verdict, which always emits the GREEN/YELLOW/AMBER/
+      RED tag plus per-signal breakdown.
     entity_ids: [verdict]
-    rationale: "D007 load-bearing thesis."
-    status: spec
+    rationale: >
+      D007 load-bearing thesis. iomoments_verdict_compute is invoked
+      unconditionally in iomoments.c's main; the print path
+      unconditionally emits the verdict section.
+    implementation_refs:
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+      - "src/iomoments.c:print_verdict"
+      - "src/iomoments.c:print_report"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_e2e_stationary_should_be_green"
+      - "tests/c/test_verdict.c:test_overall_is_worst_of_all"
+    status: tested
 
   - name: red_verdict_refuses_moment_emission
     description: >
       When the verdict is red, iomoments MUST NOT emit moment-based
-      summary statistics. The recommended-alternative output replaces
-      the moments.
+      summary statistics as a recommendation. The print_verdict path
+      emits a "Moment-based summary refused" block pointing the
+      operator at DDSketch / HDR Histogram alternatives.
     entity_ids: [verdict, moment]
     rationale: "D007 thesis; the 'honest infeasibility' core."
-    status: spec
+    implementation_refs:
+      - "src/iomoments.c:print_verdict"
+      - "src/iomoments_verdict.h:iomoments_verdict_compute"
+    verification_refs:
+      - "tests/c/test_verdict.c:test_red_overall_propagates_from_constant_stream"
+      - "tests/c/test_verdict.c:test_sample_count_red_when_too_few"
+      - "tests/c/test_verdict.c:test_variance_sanity_red_on_constant_stream"
+    status: tested
 
   - name: moments_emitted_in_both_raw_and_log_space
     description: >
@@ -399,6 +599,103 @@ domain_constraints:
       - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
       - "tooling/vmtest/matrix-sweep-2026-04-24.log"
     status: tested
+
+  - name: bpf_safe_multiprecision_arithmetic
+    description: >
+      The BPF k=4 hot path computes products and sums whose
+      intermediate magnitude exceeds s64. The kernel BPF verifier
+      rejects compiler-emitted __multi3 / __divti3 libcalls (which
+      would naturally arise from __int128 expressions), so iomoments
+      builds 128-bit signed integer arithmetic by hand from 64-bit
+      primitives. Each primitive is validated against the compiler's
+      __int128 extension over hand-picked boundary cases plus a
+      deterministic LCG sweep of 2000 trials per primitive.
+    entity_ids: [moment]
+    expression: >
+      All multi-precision arithmetic in the BPF compile path uses
+      hand-rolled 64-bit ops only. No __multi3, __divti3, __int128
+      libcalls present in the BPF object.
+    rationale: >
+      Discovered while extending pebay_bpf.h to k=4: m3 / m4 and
+      their per-sample products exceed s64 for realistic workloads.
+      Pivoted from "punt to userspace" to "hand-rolled int128" after
+      the m2->s128 attempt revealed BPF verifier complexity is the
+      true constraint, not memory or CPU.
+    implementation_refs:
+      - "src/u128.h:u64_mul_u64"
+      - "src/u128.h:s64_mul_s64"
+      - "src/u128.h:s128_add"
+      - "src/u128.h:s128_sub"
+      - "src/u128.h:s128_mul_u64"
+      - "src/u128.h:s128_mul_s64"
+      - "src/u128.h:s128_div_u64"
+      - "src/u128.h:u128_div_u64_inner"
+      - "src/u128.h:s128_to_double"
+    verification_refs:
+      - "tests/c/test_u128.c:test_u64_mul_u64_lcg_sweep"
+      - "tests/c/test_u128.c:test_s64_mul_s64_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_add_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_sub_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_mul_u64_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_mul_s64_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_div_u64_lcg_sweep"
+      - "tests/c/test_u128.c:test_s128_to_double"
+    status: tested
+
+  - name: moments_of_moments_architecture
+    description: >
+      iomoments is built from one primitive (Pébay/Welford running
+      moments) applied at two levels: Level 1 in BPF accumulates
+      windowed moments of latency samples within a short window;
+      Level 2 in userspace runs the same primitive on the time
+      series of windowed Level-1 summaries. Aliasing and non-
+      stationarity present as departures of the Level-2 statistics
+      from CLT predictions for stationary Nyquist-met data.
+    entity_ids: [moment, probe]
+    expression: >
+      The temporal-coherence diagnostic is built from recursive
+      Pébay, not from FFT or a separate spectral subsystem.
+    rationale: >
+      D013. Resolves the temporal_coherence_sidecar open question.
+      The same primitive at two levels is the architectural
+      commitment — separate subsystems are explicitly rejected.
+    implementation_refs:
+      - "src/iomoments_level2.h:iomoments_level2_analyze"
+      - "src/iomoments_spectral.h:iomoments_spectral_sweep"
+      - "src/iomoments.c:run_drain_loop"
+    verification_refs:
+      - "tests/c/test_level2.c:test_confidence_function_calibration"
+      - "tests/c/test_level2.c:test_stationary_gaussian_high_confidence"
+      - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
+      - "tests/c/test_level2.c:test_aliased_periodic_low_confidence"
+      - "tests/c/test_verdict.c:test_spectral_sweep_sinusoid_at_period_4"
+    status: tested
+
+  - name: periodic_per_cpu_drain
+    description: >
+      Userspace periodically drains the per-CPU iomoments_summary_bpf
+      map at a configurable cadence (--window in iomoments.c, default
+      100 ms), merges each drain into a single iomoments_window
+      snapshot, resets the per-CPU values to zero, and pushes the
+      snapshot onto a time-indexed ring. The ring is the input to
+      Level 2 / spectral-sweep / verdict analysis.
+    entity_ids: [moment, probe]
+    expression: >
+      The per-CPU map is drained at cadence W; the ring of windowed
+      snapshots is the substrate for D013's recursive Pébay.
+    rationale: >
+      D013 requires a time series of Level-1 summaries; the drain
+      cadence W defines the base sample rate for Level-2 analysis.
+      Periodic per-CPU drain also mitigates the m2 saturation floor
+      by limiting any one accumulator's lifetime to one window.
+    implementation_refs:
+      - "src/iomoments.c:run_drain_loop"
+      - "src/iomoments.c:drain_and_reset_summaries"
+      - "src/iomoments_level2.h"
+    verification_refs:
+      - "tests/c/test_level2.c:test_stationary_gaussian_high_confidence"
+      - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
+    status: implemented
 
 # --- Performance constraints --------------------------------------------
 #
@@ -537,18 +834,23 @@ open_questions:
 
   - id: temporal_coherence_sidecar
     text: >
-      D007 names a temporal-coherence sidecar (inter-arrival
-      coefficient of variation, variance of windowed moments vs
-      window size, spectral flatness via Welch, autocorrelation of
-      the moment time series) as a separate diagnostic phase
-      alongside the probe battery. Phase 5 omits it; it needs its
-      own DiagnosticSignal entries once the observation-window
-      design crystallizes.
+      RESOLVED 2026-04-25 by D013. The sidecar is built from
+      recursive Pébay over the time series of windowed Level-1
+      summaries (one primitive at two levels), not from FFT or a
+      separate spectral subsystem. Concrete signal set in the
+      ontology now: nyquist_confidence (variance-of-windowed-mean
+      vs CLT), autocorr_residual (lag-k Pearson autocorrelation),
+      spectral_flatness_sweep (variance-ratio across W'), and
+      half_split_moment_stability (already named pre-resolution).
+      Inter-arrival CV is not implemented — folded into the
+      autocorr / spectral signals which carry the same
+      information for stationarity diagnosis.
     context: >
-      D007 ("temporal-coherence sidecar (see future decision)
-      continuously monitoring..."). Shannon/Nyquist sampling theory
-      is the grounding. Draft the signal set when the first real
-      measurement harness lands.
+      D007 named the sidecar; D013 chose its architecture. The
+      moments-of-moments framing (one primitive applied recursively)
+      replaces the original mental model of separate diagnostic
+      phases. This question was a placeholder for that decision —
+      the resolution is the architectural commitment in D013.
     priority: medium
 
   - id: bpf_fixedpoint_scale_choice

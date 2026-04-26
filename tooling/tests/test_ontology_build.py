@@ -188,7 +188,11 @@ def test_shipped_yaml_loads_cleanly() -> None:
     assert isinstance(ont, Ontology)
     # Sanity-check the draft content matches our Phase 5 scope.
     assert len(ont.verdict_nodes) == 4
-    assert len(ont.diagnostic_signals) == 5
+    # Phase 5 floor was 5 signals (D007 named); D013 added Level 2
+    # signals (nyquist_confidence, autocorr_residual,
+    # spectral_flatness_sweep) that landed 2026-04-25. Floor at the
+    # current count; future signal additions tighten this.
+    assert len(ont.diagnostic_signals) >= 8
     assert len(ont.moment_representations) == 6
     assert len(ont.entities) >= 4
     assert len(ont.open_questions) >= 1
