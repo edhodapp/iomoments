@@ -778,6 +778,15 @@ Follow-up candidates tracked for when real workloads need them:
 
 ### D012: BPF load / verify / run tests in a VM, not on the host kernel
 
+**SUPERSEDED IN PART 2026-04-26 — see D014.** D012's claim that
+vmtest+fedora38 builds give *trustworthy* signal about real
+production verifier behavior is what's superseded; vmtest as a
+fast inner-loop dev tool stands. D014 adds a second outer-loop
+test layer (real distro kernels under vmtest + AWS distro AMIs)
+because the 6.17 host case demonstrated that fedora38-config
+acceptance does not generalize to all production kernel
+configurations. Original D012 body intact below.
+
 **Decision.** iomoments' BPF programs are loaded, verifier-checked,
 and functionally tested inside a VM with a **separate kernel
 instance** from the developer's laptop. The host kernel is NEVER
@@ -1041,3 +1050,115 @@ together.**
   temporal-coherence sidecar D007 named.
 - D011 — BPF fixed-point arithmetic; Level 1 stays at the
   post-cf81015 shape, Level 2 is double-precision userspace.
+
+---
+
+### D014: BPF verifier coverage — supported kernel range, test-harness layering, and out-of-scope policy
+
+**Date.** 2026-04-26.
+
+**Supersedes:** D012 in part — specifically the implicit claim that
+vmtest+fedora38 acceptance is sufficient signal for production
+deployment. D012's role as the fast inner-loop development tool is
+preserved; what's added is an outer-loop ground-truth layer plus
+an explicit supported-kernel-range commitment.
+
+**Decision.**
+
+1. **Supported kernel range, current revision: 5.15 through 6.12
+   inclusive.** The current iomoments BPF program (k=4 Pébay
+   update + top-K reservoir, Knuth-D 128/64 divide inlined) loads
+   under vmtest fedora38 builds at v5.15, v6.1, v6.6, v6.12. The
+   v6.17 vmtest build (also fedora38 config) rejects the program
+   with E2BIG. Distro-kernel coverage in this range has not been
+   systematically tested as of this entry; the AWS-distro-matrix
+   work (#47) will close that gap.
+
+2. **Out-of-scope, current revision: kernels with verifier
+   complexity tracking stricter than 6.12.** v6.17 is the first
+   such kernel observed. The cumulative complexity of 9 division +
+   7 multiplication multi-precision operations per event exceeds
+   the 1M-step verifier budget on these kernels. A k=3 fallback
+   variant (drops the m4 update body) is the planned path forward;
+   tracked separately. Until that lands, the supported range stops
+   at 6.12. Operators on stricter kernels see a clean load-time
+   refusal, not silent malfunction.
+
+3. **Test-harness layering.** Two distinct signals, both required
+   before shipping a verifier-budget-affecting change:
+   - **Inner loop (vmtest, fedora38 config):** fast feedback during
+     iteration. ~30 s per kernel sweep. D012 unchanged on this
+     point.
+   - **Outer loop (real distro kernels under vmtest + AWS distro
+     AMIs):** ground truth for "does this load on what customers
+     actually run." Sampled at small N per push, full-matrix
+     nightly. Implementation tracked under #47.
+
+4. **The fedora38-config-as-proxy assumption is rejected.** The
+   v6.17 case (where pristine main loaded on v5.15 / v6.1 / v6.6 /
+   v6.12 fedora38 vmtest builds, then was rejected by the host's
+   Ubuntu 6.17 kernel) confirms that vmtest fedora38 acceptance is
+   a *necessary but not sufficient* condition for production
+   deployment. The outer-loop layer addresses the gap.
+
+**Why.**
+
+- **Honest scope.** Promising 5.15-through-latest support and
+  failing silently at deploy time on a customer's box is the
+  failure mode the diagnostic-verdict layer is designed to
+  *prevent in the user's data*; doing it in our own ship metadata
+  would be ironic. Naming the supported range explicitly and
+  stopping the program at the verifier's load step is the honest
+  shape.
+- **Inner-loop value preserved.** vmtest+fedora38 catches most
+  verifier issues in seconds. Pulling that into a slower
+  outer-loop only path would slow active development by 5-10×.
+  Keeping vmtest as the inner loop and adding AWS as the outer
+  loop is the right division of labor.
+- **k=3 fallback is the right way to extend coverage** to stricter
+  verifiers, not endless restructuring of the k=4 path. The
+  failure mode on stricter kernels isn't "we didn't try hard
+  enough"; it's "the cumulative complexity of k=4 multi-precision
+  arithmetic exceeds the verifier's path-tracking budget when
+  every nested op is itself a multi-branch path." k=3 has
+  meaningfully lower complexity (no m4 path); k=2 lower still.
+  When the day comes that even k=3 is rejected, k=2 is the next
+  step. Each step is an honest, testable fallback rather than a
+  fragile bag of optimizations.
+
+**How to apply.**
+
+- **Sample-rate / scope claims** in user-facing text (README,
+  ontology entries, the *Honest Moments* paper) state the
+  supported range explicitly: 5.15-6.12 currently; broader
+  coverage tracked in followups.
+- **Anyone touching the BPF program** in a way that could affect
+  verifier complexity must run `make bpf-test-vm-matrix` against
+  the local kernel set. Adding the outer-loop AWS gate is in #47;
+  until that lands, vmtest matrix is the gate.
+- **k=3 fallback work** is tracked separately (#48 below). Don't
+  inline it into other commits; it's a distinct architectural
+  contribution that deserves its own review surface.
+
+**Followups (filed separately, do not gate this decision):**
+
+- **#47** — AWS distro-matrix orchestrator. Implements the
+  outer-loop ground-truth layer.
+- **#48** — k=3 fallback variant. Drops m4 update body under a
+  compile flag (`-DIOMOMENTS_BPF_K3_ONLY=1`). Userspace verdict
+  layer detects k=3 mode and reports YELLOW with
+  "insufficient-moment-order on this kernel" rationale on
+  m4-dependent signals (excess kurtosis, Hankel, Edgeworth, JB).
+- **AWS tracer (#46)** — validates AWS as a faithful test bed
+  before scaling the matrix.
+
+**Cross-refs:**
+- D001 — original kernel-version-floor commitment (5.15);
+  preserved.
+- D007 — diagnostic-verdict thesis; "we refuse to quote what
+  fails" extends naturally to "we refuse to load on a kernel
+  whose verifier rejects us."
+- D011 — BPF fixed-point arithmetic; the source of the
+  multi-precision complexity that creates this problem in the
+  first place.
+- D012 — vmtest as test infrastructure; supersedes-in-part above.
