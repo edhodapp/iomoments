@@ -1,0 +1,62 @@
+name: monte-carlo
+
+# Statistical-validation tests for iomoments. Out of the per-commit
+# pipeline (the deterministic test-c gate runs there) — this workflow
+# runs `make test-mc` against fresh random seeds on a schedule, plus
+# on demand via workflow_dispatch.
+#
+# Why separate: MC fixtures are probabilistic. A single run can fall
+# below its pass-rate threshold by chance even when the implementation
+# is correct. Wedging that into the per-commit pipeline would generate
+# spurious failures and erode trust in CI signal. Periodic execution
+# reveals trends — if a fixture's empirical pass rate drops below
+# threshold across multiple runs, that's evidence of a real problem;
+# a single failure is worth investigating but not blocking.
+#
+# Schedule: weekly (Sunday 04:00 UTC). Adjust by editing the cron
+# expression; GitHub schedules use UTC.
+#
+# Reproducibility: the harness prints its root seed at startup. To
+# replay a failing run, copy the seed from the failed job log and run
+# locally with `IOMOMENTS_MC_SEED=0x... make test-mc`.
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: "Trials per fixture (default 100)"
+        required: false
+        default: "100"
+      seed:
+        description: "Hex seed (e.g. 0xCAFE...) — leave empty for fresh time-based seed"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  monte-carlo:
+    name: Monte Carlo statistical fixtures
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        # test_mc.c depends only on userspace headers (pebay.h, u128.h,
+        # iomoments_*.h). No BPF compile, no libbpf, no kernel headers.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+
+      - name: Run Monte Carlo fixtures
+        # Trial count + seed forwarded from workflow_dispatch inputs;
+        # left empty for the cron path (defaults to 100 trials, fresh
+        # time-based seed).
+        env:
+          IOMOMENTS_MC_TRIALS: ${{ github.event.inputs.trials }}
+          IOMOMENTS_MC_SEED: ${{ github.event.inputs.seed }}
+        run: make test-mc
