@@ -263,7 +263,15 @@ diagnostic_signals:
                        + (γ_1^2/72)·H_6(z)]
       where φ is the standard normal PDF and H_n are probabilist's
       Hermite polynomials. Evaluate the bracketed factor on a
-      201-point grid across z ∈ [-5, +5] and track its minimum.
+      201-point grid across z ∈ [-5, +5] (deliberately bounded
+      to where the Gaussian baseline φ(z) is numerically
+      meaningful; outside that window the reconstructed PDF
+      f(z) = φ(z)·factor(z) is ε-small regardless of factor sign,
+      and the Hermite z^6 term spuriously drives factor negative
+      at |z| ≥ 6 on essentially any non-exactly-Gaussian sample)
+      and track its minimum. Distributions pathological enough to
+      need detection push the root *into* [-5, 5] (spike fixture:
+      factor ≈ -75 at z = 0).
       The signal is naturally binary: factor > 0 everywhere ⇒ valid
       density; factor ≤ 0 anywhere ⇒ invalid density (γ_1, γ_2 too
       extreme for the m1/m2 baseline they sit on).

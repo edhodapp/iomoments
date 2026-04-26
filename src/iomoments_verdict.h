@@ -590,10 +590,28 @@ iomoments_verdict_eval_jb(const struct iomoments_summary *global,
  * a self-consistency violation distinct from the moment-sequence
  * realizability that Hankel checks.
  *
- * Implementation: evaluate the bracket on a grid of standardized
- * z values across [-5, 5] (about 1e-6 of total Gaussian mass
- * outside that band, irrelevant for the band decision), track
- * the minimum value.
+ * Implementation: evaluate the bracket on a 201-point grid across
+ * z ∈ [-5, 5]. Range is *deliberately* limited to where the
+ * Gaussian baseline φ(z) is numerically meaningful — outside that
+ * window φ(z) drops below ~1e-6 and the reconstructed PDF
+ * f(z) = φ(z) · factor(z) is ε-small regardless of factor's sign.
+ *
+ * The Hermite polynomial H₆ grows as z⁶, so even tiny γ₂ produces
+ * a factor that goes negative at |z| ≥ 6 on essentially any non-
+ * exactly-Gaussian sample (e.g., γ₂ = -0.02 → factor ≈ -3 at
+ * z = ±8, but f = φ(±8) · -3 ≈ 5e-15 · -3 ≈ -1.5e-14, physically
+ * negligible). Treating that tail breakdown as a PDF-validity
+ * failure would false-AMBER on real Gaussian data; the test is
+ * meaningful only where the reconstructed PDF carries non-trivial
+ * mass.
+ *
+ * Distributions whose moments are pathological enough to need
+ * detection at |z| > 5 (γ₁ or γ₂ extreme enough to produce a
+ * negative factor in the center of the Gaussian baseline) push
+ * the polynomial root *into* [-5, 5] anyway. The spike fixture
+ * (γ₁ ≈ 31, γ₂ ≈ 995) drives factor ≈ -75 at z = 0, well within
+ * range. Mild non-normality with extreme-only-tail roots is
+ * what JB catches via its central-moment-magnitude test.
  *
  * Bands (this signal is naturally binary — a PDF is either
  * everywhere-positive or it isn't):
@@ -639,9 +657,10 @@ iomoments_verdict_eval_edgeworth(const struct iomoments_summary *global,
 	double exkurt = iomoments_summary_excess_kurtosis(global);
 	double min_factor = 1.0;
 	double z_at_min = 0.0;
-	/* 201-point grid across [-5, 5] — fine enough that the polynomial
-	 * factor's minimum is captured to <1% even at high γ₁, γ₂ where
-	 * the polynomial varies fastest. */
+	/* 201-point grid at step 0.05 across [-5, 5]. Range bounded
+	 * to where the Gaussian baseline φ(z) is numerically
+	 * meaningful — see header comment for why [-8, 8] would
+	 * false-AMBER on real data. */
 	for (int i = 0; i <= 200; i++) {
 		double z = -5.0 + 0.05 * (double)i;
 		double z2 = z * z;

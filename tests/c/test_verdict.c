@@ -54,14 +54,15 @@ static void build_normal_global(struct iomoments_summary *out, size_t n,
 		} else {
 			state = state * 6364136223846793005ULL +
 				1442695040888963407ULL;
-			double u1 =
-				(double)(state >> 11) / (double)(1ULL << 53);
+			/* (state >> 11) + 1 maps u1 to (0, 1] with no
+			 * zero — log(u1) is well-defined for every state
+			 * without the post-hoc 1e-12 clamp's small bias. */
+			double u1 = (double)((state >> 11) + 1ULL) /
+				    (double)(1ULL << 53);
 			state = state * 6364136223846793005ULL +
 				1442695040888963407ULL;
 			double u2 =
 				(double)(state >> 11) / (double)(1ULL << 53);
-			if (u1 <= 0.0)
-				u1 = 1e-12;
 			double r = sqrt(-2.0 * log(u1));
 			double t = 2.0 * 3.14159265358979323846 * u2;
 			sample = r * cos(t);
@@ -534,14 +535,14 @@ static void build_window_ring_sinusoidal_mean(struct iomoments_window *ring,
 			} else {
 				state = state * 6364136223846793005ULL +
 					1442695040888963407ULL;
-				double u1 = (double)(state >> 11) /
+				/* (state >> 11) + 1 → u1 ∈ (0, 1]; same
+				 * unbias as build_normal_global. */
+				double u1 = (double)((state >> 11) + 1ULL) /
 					    (double)(1ULL << 53);
 				state = state * 6364136223846793005ULL +
 					1442695040888963407ULL;
 				double u2 = (double)(state >> 11) /
 					    (double)(1ULL << 53);
-				if (u1 <= 0.0)
-					u1 = 1e-12;
 				double r = sqrt(-2.0 * log(u1));
 				double t = 2.0 * 3.14159265358979323846 * u2;
 				sample = r * cos(t);
@@ -655,14 +656,14 @@ static void build_window_ring_stationary(struct iomoments_window *ring,
 			} else {
 				state = state * 6364136223846793005ULL +
 					1442695040888963407ULL;
-				double u1 = (double)(state >> 11) /
+				/* (state >> 11) + 1 → u1 ∈ (0, 1]; same
+				 * unbias as build_normal_global. */
+				double u1 = (double)((state >> 11) + 1ULL) /
 					    (double)(1ULL << 53);
 				state = state * 6364136223846793005ULL +
 					1442695040888963407ULL;
 				double u2 = (double)(state >> 11) /
 					    (double)(1ULL << 53);
-				if (u1 <= 0.0)
-					u1 = 1e-12;
 				double r = sqrt(-2.0 * log(u1));
 				double t_phase =
 					2.0 * 3.14159265358979323846 * u2;
