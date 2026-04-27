@@ -42,7 +42,18 @@ BPF_OBJ_K3=${2:-build/iomoments-k3.bpf.o}
 PIN_DIR=/sys/fs/bpf/iomoments_overhead_$$
 DD_BLOCKS=${DD_BLOCKS:-20000}
 DD_BS=${DD_BS:-4k}
-TMP_FILE=$(mktemp /tmp/iomoments-overhead.XXXXXX)
+
+# Default target: a tmpfile on the host's /tmp (a real ext4/xfs path
+# on Ed's typical setup). For vmtest runs, the in-VM wrapper sets
+# OVERHEAD_TARGET to a loopback block device (/dev/loopN) so dd
+# direct-I/O fires real blk_mq events through the loop driver.
+if [ -n "${OVERHEAD_TARGET:-}" ]; then
+	TMP_FILE="$OVERHEAD_TARGET"
+	OVERHEAD_TARGET_OWNED_BY_CALLER=1
+else
+	TMP_FILE=$(mktemp /tmp/iomoments-overhead.XXXXXX)
+	OVERHEAD_TARGET_OWNED_BY_CALLER=0
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
 	echo "ERROR: must run as root (BPF attach + sysctl + direct I/O)" >&2
@@ -70,7 +81,11 @@ fi
 
 cleanup() {
 	rm -rf "$PIN_DIR" 2>/dev/null || true
-	rm -f "$TMP_FILE" 2>/dev/null || true
+	# Don't delete a caller-provided target (could be /dev/loopN).
+	if [ "$OVERHEAD_TARGET_OWNED_BY_CALLER" -eq 0 ]; then
+		rm -f "$TMP_FILE" 2>/dev/null || true
+	fi
+	rm -f "${LOAD_ERR:-}" 2>/dev/null || true
 	# Leave kernel.bpf_stats_enabled at its prior value.
 	if [ -n "${PRIOR_STATS:-}" ]; then
 		sysctl -wq kernel.bpf_stats_enabled="$PRIOR_STATS" >/dev/null
@@ -87,21 +102,43 @@ mkdir -p "$PIN_DIR"
 # distinguish from shell — if the default fails, retry with k=3 and
 # let any second failure propagate the real cause.
 LOAD_ERR=$(mktemp /tmp/iomoments-load.err.XXXXXX)
+# LOAD_ERR is now visible to the cleanup() trap registered earlier;
+# any set -e exit during the case below will rm it.
 LOADED_VARIANT=""
 LOADED_ORDER=""
-if "$BPFTOOL" prog loadall "$BPF_OBJ_DEFAULT" "$PIN_DIR" autoattach 2>"$LOAD_ERR"; then
-	LOADED_VARIANT="$BPF_OBJ_DEFAULT"
-	LOADED_ORDER="k4"
-else
-	echo "default (k=4) variant failed to load — falling back to k=3:" >&2
-	cat "$LOAD_ERR" >&2
-	rm -rf "$PIN_DIR"
-	mkdir -p "$PIN_DIR"
+# IOMOMENTS_FORCE_VARIANT={k4,k3} skips the try-k4-then-k3 dispatch
+# and loads the named variant directly. Used for clean k=4-vs-k=3
+# comparisons in the same environment (e.g., both inside vmtest).
+case "${IOMOMENTS_FORCE_VARIANT:-}" in
+k3)
 	"$BPFTOOL" prog loadall "$BPF_OBJ_K3" "$PIN_DIR" autoattach
 	LOADED_VARIANT="$BPF_OBJ_K3"
 	LOADED_ORDER="k3"
-fi
-rm -f "$LOAD_ERR"
+	;;
+k4)
+	"$BPFTOOL" prog loadall "$BPF_OBJ_DEFAULT" "$PIN_DIR" autoattach
+	LOADED_VARIANT="$BPF_OBJ_DEFAULT"
+	LOADED_ORDER="k4"
+	;;
+"")
+	if "$BPFTOOL" prog loadall "$BPF_OBJ_DEFAULT" "$PIN_DIR" autoattach 2>"$LOAD_ERR"; then
+		LOADED_VARIANT="$BPF_OBJ_DEFAULT"
+		LOADED_ORDER="k4"
+	else
+		echo "default (k=4) variant failed to load — falling back to k=3:" >&2
+		cat "$LOAD_ERR" >&2
+		rm -rf "$PIN_DIR"
+		mkdir -p "$PIN_DIR"
+		"$BPFTOOL" prog loadall "$BPF_OBJ_K3" "$PIN_DIR" autoattach
+		LOADED_VARIANT="$BPF_OBJ_K3"
+		LOADED_ORDER="k3"
+	fi
+	;;
+*)
+	echo "ERROR: IOMOMENTS_FORCE_VARIANT must be 'k3' or 'k4' (got '${IOMOMENTS_FORCE_VARIANT:-}')" >&2
+	exit 1
+	;;
+esac
 
 # Snapshot counters before workload.
 SNAP_BEFORE=$("$BPFTOOL" prog show -j)

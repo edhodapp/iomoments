@@ -125,6 +125,7 @@ help:
 	@echo "  bpf-test-vm    Load + run BPF in a VM via vmtest (D012; needs custom kernel)."
 	@echo "  bpf-test-vm-matrix  Sweep every ~/kernel-images/vmlinuz-v* kernel."
 	@echo "  bpf-overhead   Honest per-event overhead measurement on host kernel (sudo)."
+	@echo "  bpf-overhead-vm  Same, inside vmtest under KERNEL_IMAGE (loopback disk)."
 	@echo "  iomoments-build Compile the userspace iomoments binary."
 	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
 	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
@@ -427,6 +428,21 @@ bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS)
 		echo "Requires sudo for BPF attach + sysctl + direct I/O."; \
 		sudo scripts/measure_bpf_overhead.sh \
 			$(BPF_OBJS) $(BPF_K3_OBJS); \
+	fi
+
+# Same measurement but inside a vmtest guest with a loopback disk —
+# lets us exercise kernels other than the host's. Particularly
+# useful for the k=4 variant which the host (6.17) rejects but
+# every kernel in the supported range (5.15-6.12) accepts.
+# Override KERNEL_IMAGE to pick which kernel to measure under.
+bpf-overhead-vm: $(BPF_OBJS) $(BPF_K3_OBJS)
+	@if [ -z "$(BPF_OBJS)" ]; then \
+		echo "(no BPF sources; bpf-overhead-vm is a no-op today.)"; \
+	elif [ ! -f "$(KERNEL_IMAGE)" ]; then \
+		echo "ERROR: KERNEL_IMAGE not found at $(KERNEL_IMAGE)." >&2; \
+		exit 1; \
+	else \
+		scripts/measure_bpf_overhead_in_vm.sh "$(KERNEL_IMAGE)"; \
 	fi
 
 # ---------------------------------------------------------------------------

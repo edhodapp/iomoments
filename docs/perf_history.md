@@ -87,3 +87,51 @@ branch-predictor pressure on surrounding host kernel paths. That
 second-order effect requires a `perf stat` attached-vs-detached
 comparison over a fio workload, which is deferred per D014's
 outer-loop test layer.
+
+### 2026-04-26 — k=4 vs k=3 comparison inside vmtest v6.12
+
+Same host CPU and same vmtest+loopback environment for both runs;
+only the BPF variant differs. Lets us isolate the marginal cost of
+the m4 update body cleanly.
+
+- **commit:** `c6e4432` (tp_btf migration; honest measurement
+  infrastructure).
+- **kernel:** vmtest fedora38-config v6.12 (rebuilt 2026-04-26 with
+  `BLK_DEV_LOOP=y` so the in-VM script could set up a tmpfs-backed
+  loopback block device for honest blk_mq events).
+- **environment:** vmtest guest under KVM on Ed's Whiskey Lake
+  laptop; loopback storage backed by 4 KB writes against
+  `/dev/loop0` (tmpfs file).
+- **methodology:** `scripts/measure_bpf_overhead_in_vm.sh
+  ~/kernel-images/vmlinuz-v6.12`. For the k=3 run, set
+  `IOMOMENTS_FORCE_VARIANT=k3`. Otherwise identical.
+
+| variant | events | issue ns | complete ns | combined ns |
+|---|---|---|---|---|
+| k=4 | 20,001 / 20,002 | 511.41 | 1037.68 | **1549.09** |
+| k=3 | 20,001 / 20,002 | 534.51 |  817.41 | **1351.92** |
+
+**Marginal cost of m4 update body** (complete-side, k=4 minus k=3):
+**~220 ns/event**. That's the per-sample cost of the four s128
+divisions and three s128 multiplications the m4 update adds on top
+of the m3/m2/m1 path. Within the order-of-magnitude expected from
+the shift-subtract divide's 64-iteration body and BPF's per-helper-
+call overhead.
+
+**Issue-side k=4 vs k=3 delta** is 23 ns, not zero. The issue path
+is *identical* between variants (only the complete body differs);
+this reflects environmental noise (KVM scheduling, page-cache
+state, vmtest startup transients). Treat it as the floor on the
+measurement's precision in this environment — anything below that
+delta isn't a real signal.
+
+**Pair symmetry on both runs:** 20,001 issues / 20,002 completes
+(0.005% drift). The tp_btf attach catches the loopback driver's
+completion path cleanly.
+
+**Comparison to the host-NVMe k=3 baseline above:** the same k=3
+variant ran 542.90 ns/event complete on the host's real NVMe; the
+vmtest+loopback run shows 817.41 ns/event complete. ~275 ns gap,
+attributable to KVM passthrough + virtio + loopback driver
+overhead (different kernel scaffolding around the same BPF
+program). Both numbers are honest within their environment.
