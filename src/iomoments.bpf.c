@@ -4,9 +4,9 @@
 /*
  * iomoments BPF program — block I/O latency shape characterization.
  *
- * Attaches to blk_mq_start_request (issue) and blk_mq_end_request
- * (complete) via fentry. On issue, records bpf_ktime_get_ns() keyed
- * by struct-request pointer in a HASH map. On complete, looks up the
+ * Attaches to the BTF-typed block_rq_issue and block_rq_complete
+ * tracepoints. On issue, records bpf_ktime_get_ns() keyed by
+ * struct-request pointer in a HASH map. On complete, looks up the
  * start timestamp, computes latency_ns = end_ts - start_ts, and feeds
  * it into a per-CPU running summary via pebay_bpf.h (D011).
  *
@@ -16,13 +16,20 @@
  *
  * Design choices (per D007, D011, D012):
  *
- *   fentry vs tracepoint: fentry requires kernel ≥ 5.5 (iomoments
- *   floor is 5.15 per D001, so OK) but hands us the struct request *
- *   directly, which is the natural key for issue/complete pairing.
- *   The classic tracepoint/block/block_rq_* format has no request
- *   pointer in its args — pairing would need (dev, sector, pid) as a
- *   composite key with false-positive risk on concurrent same-sector
- *   requests. fentry is cleaner.
+ *   tp_btf vs fentry: Earlier revisions used fentry on
+ *   blk_mq_start_request / blk_mq_end_request. That worked on
+ *   single-request completion paths but **silently bypassed
+ *   blk_mq_end_request_batch** (the batched-completion path used by
+ *   NVMe and other modern drivers). On a 2026-04-26 measurement
+ *   against an NVMe-backed host: 20,015 issues observed, 2 completes
+ *   observed — a ~99.99% miss rate. iomoments would have undercounted
+ *   completions catastrophically on every NVMe deployment, breaking
+ *   the n counter and every downstream diagnostic. The fix: attach
+ *   to the block_rq_issue / block_rq_complete tracepoints instead.
+ *   Both fire per-request from *every* completion path, including
+ *   inside blk_mq_end_request_batch's loop. tp_btf gives us the
+ *   typed `struct request *rq` argument directly (no composite-key
+ *   workaround that the classic tracepoint format would force).
  *
  *   struct request is declared opaque (forward decl only). No
  *   vmlinux.h needed because we never dereference — only use the
@@ -106,7 +113,7 @@ struct {
 	__uint(value_size, sizeof(struct iomoments_topk));
 } iomoments_topk_map SEC(".maps");
 
-SEC("fentry/blk_mq_start_request")
+SEC("tp_btf/block_rq_issue")
 int BPF_PROG(iomoments_rq_issue, struct request *rq)
 {
 	__u64 rq_key = (__u64)(unsigned long)rq;
@@ -115,9 +122,25 @@ int BPF_PROG(iomoments_rq_issue, struct request *rq)
 	return 0;
 }
 
-SEC("fentry/blk_mq_end_request")
-int BPF_PROG(iomoments_rq_complete, struct request *rq)
+/*
+ * block_rq_complete tracepoint signature is
+ * (struct request *rq, blk_status_t error, unsigned int nr_bytes).
+ * blk_status_t is a kernel typedef of u8; we use `unsigned int` to
+ * avoid pulling in vmlinux.h for a type whose value we ignore. BTF
+ * widens the u8 to a register-sized scalar at the trampoline so the
+ * declared `unsigned int` matches what the verifier sees.
+ *
+ * Timing baseline note for future maintainers: block_rq_issue
+ * fires from inside blk_mq_start_request via trace_block_rq_issue(rq);
+ * the timestamp shift vs the prior fentry attach is a handful of ns,
+ * negligible for microsecond-scale I/O latency.
+ */
+SEC("tp_btf/block_rq_complete")
+int BPF_PROG(iomoments_rq_complete, struct request *rq, unsigned int error,
+	     unsigned int nr_bytes)
 {
+	(void)error;
+	(void)nr_bytes;
 	__u64 rq_key = (__u64)(unsigned long)rq;
 	const __u64 *start_ts_p =
 		bpf_map_lookup_elem(&iomoments_req_start, &rq_key);

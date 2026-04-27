@@ -124,6 +124,7 @@ help:
 	@echo "  bpf-verify     Static bpftool BTF inspection on the .bpf.o (no kernel load)."
 	@echo "  bpf-test-vm    Load + run BPF in a VM via vmtest (D012; needs custom kernel)."
 	@echo "  bpf-test-vm-matrix  Sweep every ~/kernel-images/vmlinuz-v* kernel."
+	@echo "  bpf-overhead   Honest per-event overhead measurement on host kernel (sudo)."
 	@echo "  iomoments-build Compile the userspace iomoments binary."
 	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
 	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
@@ -411,6 +412,24 @@ bpf-test-vm-matrix: $(BPF_OBJS)
 	fi
 
 # ---------------------------------------------------------------------------
+# Honest per-event overhead measurement. Loads the BPF program on the
+# host kernel (real I/O traffic), enables kernel.bpf_stats_enabled,
+# generates direct-I/O load via dd, reads run_time_ns / run_cnt from
+# bpftool, computes per-event ns. Tries k=4 default first; falls back
+# to k=3 on verifier rejection (mirrors the runtime selection in
+# src/iomoments.c). Requires sudo.
+# ---------------------------------------------------------------------------
+bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS)
+	@if [ -z "$(BPF_OBJS)" ]; then \
+		echo "(no BPF sources; bpf-overhead is a no-op today.)"; \
+	else \
+		echo "Running scripts/measure_bpf_overhead.sh on host kernel."; \
+		echo "Requires sudo for BPF attach + sysctl + direct I/O."; \
+		sudo scripts/measure_bpf_overhead.sh \
+			$(BPF_OBJS) $(BPF_K3_OBJS); \
+	fi
+
+# ---------------------------------------------------------------------------
 # Ontology gate (D010). build-ontology is idempotent — no-op if the YAML
 # content hash matches the DAG's current node. gate-ontology rebuilds
 # first so the audit always reads an up-to-date DAG (catches "edited the
@@ -427,7 +446,7 @@ gate-ontology: build-ontology
 # ---------------------------------------------------------------------------
 gate-local: lint test gate-ontology
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		find tooling -type f -name '*.sh' -print0 \
+		find tooling scripts -type f -name '*.sh' -print0 \
 		  | xargs -0 -r shellcheck; \
 	else \
 		echo "SKIP: shellcheck not installed."; \
