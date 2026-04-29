@@ -290,9 +290,6 @@ def snapshot_if_changed(
     return node_id, True
 
 
-# -- Phase 3: advisory-locked transaction ---------------------------------
-
-
 _DEFAULT_KEEP_LAST_K = 100  # D015 §4: cross-snapshot retention default
 
 
@@ -546,7 +543,7 @@ def test_results_dag_transaction(
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
-# -- Original OntologyDAG transaction (unchanged) -------------------------
+# -- OntologyDAG advisory-locked transaction (Phase 3) -------------------
 
 
 @contextmanager
