@@ -836,6 +836,47 @@ domain_constraints:
       - "tests/c/test_level2.c:test_drifting_mean_low_confidence"
     status: implemented
 
+  - name: audit_detects_documented_negative_cases
+    description: >
+      The ontology audit (D010) is itself the gate that catches
+      "claim X is tested" lies. The audit is therefore a load-bearing
+      claim that must itself be tested — one specific failing test
+      per documented forbidden combination. D013's moments-of-moments
+      recursive primitive applied to the project's own discipline
+      tooling: a probe of the probe. If the audit's own tests pass,
+      the gate works; if any fail, the gate has regressed and the
+      whole ontology-traceability story underneath it becomes
+      suspect.
+    rationale: >
+      D010 (audit-ontology as closing gate) + D013 (recursive
+      primitive). Without this row, the audit could degrade silently
+      and every other "tested" claim would inherit the silent
+      degradation. With this row, audit drift fails the audit gate
+      itself.
+    implementation_refs:
+      - "tooling/src/audit_ontology/audit.py:run_audit"
+      - "tooling/src/audit_ontology/resolver.py:resolve_ref"
+      - "tooling/src/audit_ontology/consistency.py:check_status_refs_consistency"
+    verification_refs:
+      - "tooling/tests/test_audit_negatives.py::test_negative_tested_with_empty_verif_refs"
+      - "tooling/tests/test_audit_negatives.py::test_negative_implemented_missing_impl_refs"
+      - "tooling/tests/test_audit_negatives.py::test_negative_implemented_missing_verif_refs"
+      - "tooling/tests/test_audit_negatives.py::test_negative_deviation_without_rationale"
+      - "tooling/tests/test_audit_negatives.py::test_negative_verif_ref_file_missing"
+      - "tooling/tests/test_audit_negatives.py::test_negative_impl_ref_file_missing"
+      - "tooling/tests/test_audit_negatives.py::test_negative_symbol_absent_from_real_file"
+      - "tooling/tests/test_audit_negatives.py::test_negative_symbol_only_in_python_comment"
+      - "tooling/tests/test_audit_negatives.py::test_negative_symbol_only_in_c_comment"
+      - "tooling/tests/test_audit_negatives.py::test_negative_python_substring_of_longer_identifier"
+      - "tooling/tests/test_audit_negatives.py::test_negative_c_substring_of_longer_identifier"
+      - "tooling/tests/test_audit_negatives.py::test_negative_multiple_gaps_in_one_row"
+      - "tooling/tests/test_audit_negatives.py::test_negative_iterates_all_constraint_kinds"
+      - "tooling/tests/test_audit_negatives.py::test_invariant_summary_refs_match_externally_known_ground_truth"
+      - "tooling/tests/test_audit_negatives.py::test_invariant_rows_with_gap_le_total_rows"
+      - "tooling/tests/test_audit_negatives.py::test_invariant_total_rows_equals_iteration_length"
+      - "tooling/tests/test_audit_negatives.py::test_invariant_clean_ontology_has_zero_gap_metrics"
+    status: tested
+
 # --- Performance constraints --------------------------------------------
 #
 # All budgets are spec-level targets today — no measured values exist
