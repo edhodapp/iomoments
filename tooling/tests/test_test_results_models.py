@@ -241,6 +241,26 @@ def test_dag_root_nodes_finds_unparented() -> None:
     assert {n.id for n in roots} == {"root", "child"}
 
 
+def test_dag_rejects_duplicate_node_ids() -> None:
+    """A duplicate node ID makes get_node ambiguous; pin the validator."""
+    with pytest.raises(ValidationError, match="duplicate TestResultsDAGNode"):
+        TestResultsDAG(
+            project_name="iomoments",
+            nodes=[
+                TestResultsDAGNode(
+                    id="dup",
+                    snapshot=TestResultsSnapshot(),
+                    created_at="2026-04-29T12:00:00Z",
+                ),
+                TestResultsDAGNode(
+                    id="dup",
+                    snapshot=TestResultsSnapshot(),
+                    created_at="2026-04-29T12:01:00Z",
+                ),
+            ],
+        )
+
+
 def test_dag_json_round_trip() -> None:
     original = TestResultsDAG(
         project_name="iomoments",

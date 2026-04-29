@@ -627,6 +627,28 @@ class TestResultsDAG(BaseModel):
     edges: list[DAGEdge] = []
     current_node_id: str = ""
 
+    @model_validator(mode="after")
+    def _reject_duplicate_node_ids(self) -> "TestResultsDAG":
+        """A duplicate node ID makes get_node ambiguous.
+
+        get_node returns the first match by iteration order; a future
+        navigation method that builds an {id: node} dict lookup would
+        get the LAST match. Two callers reading "the same" node ID
+        could land on different snapshots — silent data corruption.
+        UUID-based IDs (via make_node_id) make collisions
+        practically impossible, but the validator pins the
+        invariant so a hand-edited DAG file can't violate it.
+        """
+        seen: set[str] = set()
+        for n in self.nodes:
+            if n.id in seen:
+                raise ValueError(
+                    f"duplicate TestResultsDAGNode id={n.id!r}; "
+                    "node IDs must be unique within a DAG"
+                )
+            seen.add(n.id)
+        return self
+
     # --- Navigation (mirror OntologyDAG) ---------------------------------
 
     def get_node(self, node_id: str) -> TestResultsDAGNode | None:
