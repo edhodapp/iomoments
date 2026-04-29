@@ -10,7 +10,8 @@ phases — see D009.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -475,6 +476,178 @@ class OntologyDAG(BaseModel):
     @classmethod
     def from_json(cls, text: str) -> "OntologyDAG":
         """Deserialize from JSON string."""
+        return cls.model_validate_json(text)
+
+
+# --- Test-results DAG (D015) --------------------------------------------
+#
+# Parallel artifact to OntologyDAG. The ontology DAG records what the
+# project CLAIMS to be true (rows with refs); the test-results DAG
+# records what was OBSERVED to be true (one record per passing test
+# invocation, captured at a specific git SHA in a specific environment).
+#
+# The audit gate (D015 §2) cross-checks the two: a claim is `tested`
+# only if every (verification_ref, expected_environment) it declares
+# has a passing TestResult captured at-or-after the latest commit
+# touching any of the claim's refs. See D015 for the full freshness
+# rule in mathematical notation.
+
+
+class EnvironmentSpec(BaseModel):
+    """Where a TestResult was captured.
+
+    ``kind`` namespaces other fields. Known kinds today:
+    - ``host``: developer/CI host machine; kernel/distro irrelevant.
+    - ``vmtest``: vmtest-booted guest; ``kernel`` carries the matrix
+      tag (e.g., ``v6.18``).
+    - ``aws-ec2``: EC2 instance via aws_tracer.sh; ``kernel`` and
+      ``distro`` carry the as-observed values.
+
+    ``fix_recipe`` is the template the audit interpolates into a
+    failure message's ``fix:`` line so the user sees the exact
+    re-run command. Empty fix_recipe is allowed; the failure message
+    degrades to WHY-only without the FIX line. Producers fill in
+    their templates as they're wired up (D015 §5, §7).
+
+    The ``kind`` field is currently typed as ``str`` rather than a
+    Literal so producers can introduce new env shapes without
+    requiring a coordinated schema update; D015 §3 expects this set
+    to grow as the producer-wiring sequence proceeds.
+    """
+
+    kind: str
+    kernel: str = ""
+    distro: str = ""
+    arch: str = "x86_64"
+    flags: dict[str, str] = {}
+    fix_recipe: str = ""
+
+    def natural_key(
+        self,
+    ) -> tuple[str, str, str, str, tuple[tuple[str, str], ...]]:
+        """Return a hashable key for dedup / lookup.
+
+        Two EnvironmentSpec instances are considered the same
+        environment iff their natural_keys are equal — used by
+        TestResultsSnapshot's duplicate-rejection validator and by
+        the audit's per-(ref, env) freshness lookup. ``fix_recipe``
+        is intentionally NOT part of the key (it's metadata about
+        how to re-run, not about which env was used).
+        """
+        return (
+            self.kind,
+            self.kernel,
+            self.distro,
+            self.arch,
+            tuple(sorted(self.flags.items())),
+        )
+
+
+class TestResult(BaseModel):
+    """One captured test outcome.
+
+    Per D015 §6, only ``outcome="pass"`` is stored — failures are
+    surfaced by the test runner's exit-non-zero (the commit/push
+    doesn't happen, which is its own kind of artifact). Storing
+    failures would conflate audit data with forensic data.
+
+    ``measurements`` is empty for functional tests; perf-claim
+    consumers populate it with metric→value pairs.
+    """
+
+    # Tell pytest not to collect — class name starts with "Test" by
+    # design (D015 vocabulary), but it's a data model, not a test.
+    __test__ = False
+
+    verification_ref: str
+    environment: EnvironmentSpec
+    outcome: Literal["pass"]
+    captured_git_sha: str
+    captured_at: datetime
+    measurements: dict[str, float] = {}
+
+
+class TestResultsSnapshot(BaseModel):
+    """One snapshot of (verification_ref, environment) → TestResult.
+
+    Per D015 §4, within-snapshot retention is latest-passing-per-
+    (verification_ref, environment). The validator enforces this:
+    constructing a snapshot with two TestResults sharing
+    (verification_ref, environment.natural_key()) raises. The
+    persistence layer (snapshot_test_result) is responsible for
+    pruning older results before constructing the snapshot.
+    """
+
+    __test__ = False
+
+    results: list[TestResult] = []
+
+    @model_validator(mode="after")
+    def _reject_duplicate_results(self) -> "TestResultsSnapshot":
+        _EnvKey = tuple[str, str, str, str, tuple[tuple[str, str], ...]]
+        seen: set[tuple[str, _EnvKey]] = set()
+        for r in self.results:
+            key = (r.verification_ref, r.environment.natural_key())
+            if key in seen:
+                raise ValueError(
+                    f"duplicate TestResult for "
+                    f"verification_ref={r.verification_ref!r} "
+                    f"in environment {r.environment.kind!r}"
+                )
+            seen.add(key)
+        return self
+
+
+class TestResultsDAGNode(BaseModel):
+    """A node in the test-results version DAG."""
+
+    __test__ = False
+
+    id: str
+    snapshot: TestResultsSnapshot
+    created_at: str
+    label: str = ""
+
+
+class TestResultsDAG(BaseModel):
+    """Versioned test-results DAG — the project's test-outcome history.
+
+    Mirror of OntologyDAG with the same content-hash dedup, fcntl
+    locking, and append-only discipline. Lives in
+    ``tooling/iomoments-test-results.json``. Reuses ``DAGEdge`` /
+    ``Decision`` from the ontology layer — edges carry the same
+    "what changed and why" structure regardless of which DAG
+    they're in.
+    """
+
+    __test__ = False
+
+    project_name: str
+    nodes: list[TestResultsDAGNode] = []
+    edges: list[DAGEdge] = []
+    current_node_id: str = ""
+
+    # --- Navigation (mirror OntologyDAG) ---------------------------------
+
+    def get_node(self, node_id: str) -> TestResultsDAGNode | None:
+        return next(
+            (n for n in self.nodes if n.id == node_id), None,
+        )
+
+    def get_current_node(self) -> TestResultsDAGNode | None:
+        return self.get_node(self.current_node_id)
+
+    def root_nodes(self) -> list[TestResultsDAGNode]:
+        child_ids = {e.child_id for e in self.edges}
+        return [n for n in self.nodes if n.id not in child_ids]
+
+    # --- Serialization ---------------------------------------------------
+
+    def to_json(self) -> str:
+        return self.model_dump_json(indent=2)
+
+    @classmethod
+    def from_json(cls, text: str) -> "TestResultsDAG":
         return cls.model_validate_json(text)
 
 
