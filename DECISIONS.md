@@ -1162,3 +1162,253 @@ an explicit supported-kernel-range commitment.
   multi-precision complexity that creates this problem in the
   first place.
 - D012 — vmtest as test infrastructure; supersedes-in-part above.
+
+### D015: Test results as a separate DAG; freshness-based audit invariant
+
+**Date.** 2026-04-29.
+
+**Extends.** D009 (ontology DAG as formal verifiable requirements)
+and D010 (audit-ontology as closing pre-push gate). Neither is
+superseded; D015 adds a second dimension to the existing audit's
+question.
+
+**The gap this closes.** D010's audit answers "do the named
+file/symbol refs in the ontology resolve against the working tree?"
+That catches renamed-symbol drift and mistyped paths. It does NOT
+answer "did the test that this claim depends on actually run for
+the current code state?" A claim's `verification_refs` can resolve
+cleanly (the test function still exists) while the test was never
+re-run after the implementation it covers was edited. The claim
+remains `tested` by the audit's lights; the test was actually
+skipped.
+
+This is the same shape of dishonesty iomoments is built to refuse,
+applied to the project's self-description: a refusable verdict
+("yes, this property holds") emitted without the underlying
+measurement actually being current. D007's posture demands we
+refuse it of ourselves.
+
+**Decision.** Introduce a second DAG-shaped artifact that records
+test outcomes with git-SHA provenance, and extend the audit gate
+with a freshness invariant.
+
+#### 1. New artifact: TestResult records, persisted as a DAG
+
+A `TestResult` is the parsed projection of one test invocation:
+
+```python
+class TestResult(BaseModel):
+    verification_ref: str          # e.g. "tests/c/test_pebay.c:test_tiny_stream"
+    environment: EnvironmentSpec   # see below
+    outcome: Literal["pass"]       # only passes are stored; see §6
+    captured_git_sha: str          # 40-char SHA from `git rev-parse HEAD`
+    captured_at: datetime          # UTC timestamp of capture
+    measurements: dict[str, float] # optional, perf-claim consumers fill in
+
+class EnvironmentSpec(BaseModel):
+    kind: Literal["host", "vmtest", "aws-ec2", ...]
+    kernel: str = ""               # e.g. "v5.15", "6.8.0-1052-aws", ""
+    distro: str = ""               # e.g. "ubuntu-22.04", "al2023", ""
+    arch: str = "x86_64"
+    flags: dict[str, str] = {}     # producer-specific
+    fix_recipe: str = ""           # template for re-run command (per §5)
+```
+
+These records live in their own DAG file, **`tooling/iomoments-test-results.json`**, separate from `tooling/iomoments-ontology.json`. The
+two artifacts share the `OntologyDAG`-style content-hash dedup,
+fcntl-locked write transactions, and append-only snapshot
+discipline already implemented in `iomoments_ontology/dag.py`.
+
+**Why separate, not the same DAG.** The two artifacts have
+fundamentally different write cadence and consumer:
+
+- The ontology evolves on author intent (YAML edits, ~few/day at
+  peak, often days at zero).
+- Test results evolve on every test run (every commit fires
+  pre-commit pytest; every push fires the full pipeline; CI when
+  it exists fires more).
+
+Mixing them muddles the diff stories — every test run would appear
+as an "ontology change" in `git log`. Keeping them separate
+preserves the ontology DAG's reviewability while letting the
+test-results DAG churn at machine cadence.
+
+#### 2. The freshness invariant
+
+A claim `c` is `tested` at HEAD iff:
+
+```
+∀ T ∈ verification_refs(c).
+∀ E ∈ expected_environments(c).
+  ∃ R ∈ test_results.
+    R.verification_ref = T ∧
+    R.environment ⊑ E ∧
+    R.outcome = pass ∧
+    R.captured_git_sha ∈ ancestry(HEAD) ∧
+    R.captured_git_sha ≽ max{ last_touch(f) :
+                              f ∈ files(impl_refs(c) ∪ verification_refs(c)) }
+```
+
+where:
+
+- `last_touch(f)` is the most recent commit in HEAD's ancestry that
+  touched file `f`, computed as `git log -1 --format=%H HEAD -- f`.
+- `≽` on git SHAs means "at-or-after, in HEAD's ancestry" — i.e.,
+  `git merge-base --is-ancestor X Y` and `X` not strictly earlier
+  than `Y` along that chain.
+- `⊑` on `EnvironmentSpec` is structural-subtype matching: an
+  empty `kernel` or `distro` field on the claim's required `E`
+  matches any value on `R.environment`; non-empty fields must
+  equal.
+
+The mathematical notation is deliberate (per the queued Lean-
+formalization note): the audit's logic has edge cases (cherry-
+picks, squash-merges, multi-parent merges, reverts) where
+imprecise English would underdetermine behavior. Writing the rule
+as quantified statements forces commitment now and makes
+eventual translation to Lean mechanical. See
+`memory/project_lean_formalization_queued.md` for the trigger
+condition that would un-defer Lean work.
+
+**Symbol-level grain is deferred.** `last_touch` operates on
+files, not on symbols within files, in v1. A whitespace edit
+to `src/pebay.h` invalidates every claim that refs any symbol in
+`pebay.h`. Symbol-level grain via `git log -L :symbol:file` is the
+correct refinement and is a separate D-entry when iomoments
+outgrows file-level.
+
+#### 3. Schema change to claims: `expected_environments`
+
+Each constraint type (`DomainConstraint`, `PerformanceConstraint`,
+`DiagnosticSignal`, `VerdictNode`) gains a new field:
+
+```python
+expected_environments: list[EnvironmentSpec] = [HOST_ENV]
+```
+
+Default is a single `host` environment. Claims that demand
+broader coverage (e.g., `bpf_programs_tested_in_vm_not_host` now
+demands the full vmtest matrix; the AWS-faithfulness claim
+demands ubuntu-22.04 and al2023 environments) declare the
+required envs explicitly. The audit checks per-env coverage as
+part of the freshness rule above.
+
+#### 4. Retention rules
+
+**Within a snapshot.** Latest-passing-per-(verification_ref,
+environment). When a new TestResult arrives, the snapshot
+builder prunes any older record with the same `(ref, env)` pair
+before writing. Snapshot size is bounded by `O(refs × envs)`
+— small (~150 refs × <10 envs today) and grows with the ontology,
+not with time.
+
+**Across snapshots.** Keep last K nodes in the DAG, default
+K = 100. Older ancestor nodes are pruned. Loses the ability to
+answer "what did test_X look like at commit Y six months ago" —
+acceptable, the audit never asks that question; only the most
+recent pass-per-(ref, env) gates the current push.
+
+**`docs/perf_history.md` is out of scope for D015.** Its
+retention rule is deliberately a separate, deferred decision
+(see `memory/project_perf_history_retention_deferred.md`).
+Perf measurement values continue to live in the markdown
+log. Perf claims' freshness is gated on the existence of a
+TestResult record (which the perf script will emit), not on
+the markdown log. The two artifacts coexist until the audit
+needs to read measurement values directly, at which point a
+separate D-entry will resolve the dual-storage question.
+
+#### 5. Audit failure messages: three modes, one fix-recipe
+
+When the audit fires, the user needs the WHY and the FIX, not
+just a row in a table. Failures distinguish three modes,
+phrased in iomoments-language:
+
+1. **"runner forgot to fire a test"** — verification_ref has
+   no matching TestResult at-or-after the impl's last touch.
+2. **"stale result, code edited since last pass"** — a
+   TestResult exists but its captured_git_sha precedes the
+   impl's last_touch.
+3. **"environment never exercised"** — no TestResult exists
+   for this (ref, env) pair at any SHA.
+
+Each failure prints: claim name, verification_ref, environment,
+the SHA-pair that triggered the gap (in iomoments-prose, e.g.,
+"src/iomoments.bpf.c last edited at 2183903 (2026-04-29); no
+test result captured at-or-after that commit"), and a `fix:`
+line with the re-run command.
+
+The fix-recipe template lives on `EnvironmentSpec.fix_recipe` —
+each environment carries the inverse of itself ("how to re-run a
+test in this env"). Examples:
+
+- `host` env: `fix_recipe = ".venv/bin/pytest {ref}"`
+- `vmtest` env: `fix_recipe = "make bpf-test-vm KERNEL_IMAGE=~/kernel-images/vmlinuz-{kernel}"`
+- `aws-ec2` env: `fix_recipe = "bash scripts/aws_tracer.sh"`
+
+Empty `fix_recipe` is allowed; the failure message degrades to
+WHY-only without the FIX line. Producers fill in the template
+as they're wired up.
+
+#### 6. What deliberately does NOT enter the test-results DAG
+
+- **Failed test outcomes.** The test runner's non-zero exit
+  status IS the failure record — the commit/push doesn't happen,
+  which is its own kind of artifact (its absence in `git log`).
+  Storing failures would conflate audit data with forensic
+  data; a separate failure-history sink can be added later if
+  needed.
+- **Skip outcomes.** Same logic — a skipped test is the absence
+  of a pass, indistinguishable from "test never ran" for the
+  audit's purposes.
+- **Non-test-runner data** (perf measurements that aren't
+  associated with a verification_ref, free-form benchmarks,
+  exploratory scripts).
+
+#### 7. Producer wiring: sequence, not parallel
+
+The audit cannot enforce freshness on a claim until at least one
+producer emits records for that claim's verification_refs.
+Producers wire in this sequence; each lands in its own commit:
+
+1. **pytest plugin.** Most claims today are tested by pytest;
+   one producer covers the broadest surface immediately.
+2. **AWS probe** (`scripts/aws_tracer.sh`). Small, isolated,
+   already producing structured exit codes; converts the
+   `build/aws-tracer/<distro>/{k4,k3}.verdict` files into
+   TestResult records.
+3. **C-test harness.** The `make test-c` family.
+4. **vmtest matrix.** Existing wrapper extended to emit one
+   record per (kernel, program) pair.
+5. **Perf scripts.** Emit records with measurements populated.
+
+Each step extends ontology coverage and exercises the audit on
+real data; each step adds the producer's `fix_recipe` to the
+relevant `EnvironmentSpec`. Don't wire all six at once.
+
+#### 8. Bootstrap: explicit one-time bypass
+
+First time the audit runs, no test results exist. Every claim
+fails freshness. To avoid embedding a special case in audit
+logic forever, ship a **one-time `--bootstrap` flag** that
+allows-no-results, used once at landing time then removed in a
+follow-up commit. The audit's normal mode treats absent results
+as a real gap, as it should.
+
+**Cross-refs:**
+- D007 — diagnostic-verdict thesis; D015 applies the same posture
+  to the project's self-description.
+- D009 — the ontology DAG this extends.
+- D010 — the audit gate this extends; D015's new failure modes
+  flow through the same `--exit-nonzero-on-gap` path.
+- D013 — moments-of-moments architecture; the audit-applied-to-
+  itself is structurally the same recursive move (a probe of the
+  probe).
+- `memory/project_lean_formalization_queued.md` — the math
+  notation in §2 is the seed for eventual Lean formalization,
+  trigger-deferred.
+- `memory/project_perf_history_retention_deferred.md` — explicitly
+  out-of-scope retention question.
+
+**Status.** Designed. Not yet implemented. Implementation lands
+across the seven producer steps in §7, each as its own commit.
