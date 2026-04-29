@@ -441,13 +441,22 @@ def prune_test_results_dag_nodes(
 
     D015 §4 across-snapshot retention. The current node is always
     kept; pruning walks the parent chain from current and keeps the
-    most recent K-1 ancestors. Edges into pruned nodes are dropped
-    too. Audit only reads the current snapshot, so pruning ancient
-    history doesn't affect correctness.
+    most recent K-1 ancestors. Only edges TOUCHING a pruned node are
+    dropped — disconnected nodes (not in the current chain) and
+    edges between them are preserved intact. Audit only reads the
+    current snapshot, so pruning ancient history on the current
+    chain doesn't affect correctness.
 
-    Disconnected nodes (not in the current node's ancestry) are
-    NOT touched — this function is conservative; it only prunes
-    what's safely on the chain to the current node.
+    **DAG-shape assumption: linear chain.** This function assumes the
+    DAG is a single chain (every non-root node has exactly one
+    parent). save_test_results_snapshot always links new nodes as
+    children of current_node_id, so producers always produce linear
+    chains. If a future caller hand-constructs a merge node (multiple
+    parents), the chain walk here uses a {child_id → parent_id} dict
+    that records only the last parent encountered, so the chain
+    walked here would skip alternative ancestry paths. Surface this
+    if a producer ever needs merge support; until then the linearity
+    is a documented invariant.
     """
     if keep_last_k < 1:
         raise ValueError(f"keep_last_k must be >= 1, got {keep_last_k}")
@@ -466,14 +475,17 @@ def prune_test_results_dag_nodes(
     if len(chain) <= keep_last_k:
         return 0
 
-    keep_ids = set(chain[:keep_last_k])
     drop_ids = set(chain[keep_last_k:])
 
     before_node_count = len(dag.nodes)
     dag.nodes = [n for n in dag.nodes if n.id not in drop_ids]
+    # Only drop edges that TOUCH a pruned node. Edges between two
+    # disconnected-branch nodes (neither in drop_ids) are preserved
+    # — the docstring promises "disconnected nodes are NOT touched"
+    # and that has to extend to their incident edges.
     dag.edges = [
         e for e in dag.edges
-        if e.parent_id in keep_ids and e.child_id in keep_ids
+        if e.parent_id not in drop_ids and e.child_id not in drop_ids
     ]
     return before_node_count - len(dag.nodes)
 

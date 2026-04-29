@@ -16,9 +16,12 @@ from pathlib import Path
 import pytest
 
 from iomoments_ontology import (
+    DAGEdge,
+    Decision,
     EnvironmentSpec,
     TestResult,
     TestResultsDAG,
+    TestResultsDAGNode,
     TestResultsSnapshot,
     load_test_results_dag,
     prune_and_add_result,
@@ -253,6 +256,69 @@ def test_prune_nodes_drops_orphaned_edges() -> None:
     for e in dag.edges:
         assert e.parent_id in surviving_node_ids
         assert e.child_id in surviving_node_ids
+
+
+def test_prune_nodes_preserves_disconnected_branch() -> None:
+    """Edges between two nodes neither of which is on the current
+    chain must survive pruning. Earlier edge-filter logic dropped
+    all edges where either endpoint was outside the kept-on-chain
+    set, contradicting the docstring's "disconnected nodes are NOT
+    touched" promise. This test pins the corrected behavior.
+    """
+    # Build a 4-node main chain via the normal API.
+    dag = TestResultsDAG(project_name="iomoments")
+    for i in range(4):
+        snapshot_test_results_if_changed(
+            dag,
+            TestResultsSnapshot(results=[_result(ref=f"r{i}")]),
+            label=f"main-{i}",
+        )
+    main_chain_node_ids = {n.id for n in dag.nodes}
+
+    # Inject a disconnected pair — two nodes with an edge between
+    # them, neither on the main chain.
+    iso_a = TestResultsDAGNode(
+        id="iso-a",
+        snapshot=TestResultsSnapshot(results=[_result(ref="iso_a")]),
+        created_at="2026-04-29T11:00:00Z",
+        label="iso-a",
+    )
+    iso_b = TestResultsDAGNode(
+        id="iso-b",
+        snapshot=TestResultsSnapshot(results=[_result(ref="iso_b")]),
+        created_at="2026-04-29T11:01:00Z",
+        label="iso-b",
+    )
+    dag.nodes.extend([iso_a, iso_b])
+    dag.edges.append(DAGEdge(
+        parent_id="iso-a",
+        child_id="iso-b",
+        decision=Decision(
+            question="iso", options=["x"], chosen="x", rationale="iso",
+        ),
+        created_at="2026-04-29T11:01:00Z",
+    ))
+
+    # Prune main chain to keep_last_k=2 — drops the 2 oldest main
+    # chain nodes. The disconnected pair must survive in full.
+    prune_test_results_dag_nodes(dag, keep_last_k=2)
+
+    surviving_ids = {n.id for n in dag.nodes}
+    assert "iso-a" in surviving_ids, (
+        "disconnected node iso-a was dropped — pruning is over-zealous"
+    )
+    assert "iso-b" in surviving_ids
+    iso_edges = [
+        e for e in dag.edges
+        if e.parent_id == "iso-a" and e.child_id == "iso-b"
+    ]
+    assert len(iso_edges) == 1, (
+        "edge between disconnected nodes was dropped — earlier "
+        "edge-filter logic regression"
+    )
+    # Sanity: 2 main chain nodes survive.
+    surviving_main = surviving_ids & main_chain_node_ids
+    assert len(surviving_main) == 2
 
 
 def test_prune_nodes_rejects_zero_or_negative_k() -> None:
