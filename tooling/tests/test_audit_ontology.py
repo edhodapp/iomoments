@@ -162,6 +162,34 @@ def test_resolver_bpf_sec_macro_found(tmp_path: Path) -> None:
     assert result.resolution is Resolution.OK
 
 
+def test_resolver_c_accepts_call_at_column_zero(tmp_path: Path) -> None:
+    """Documents an intentional resolver coarseness, not a bug.
+
+    The C ``^\\s*{name}\\s*\\(`` pattern (resolver._C_PATTERNS, the
+    "macro-like invocations" entry) matches any line starting with
+    ``name(`` — including a function call at column 0 or an unindented
+    macro invocation. The resolver's header comment names this as an
+    accepted tradeoff vs the cost of a proper C parse.
+
+    This test pins the current behavior so a future tightening of the
+    resolver (e.g., requiring a closing ``)`` followed by ``{`` to
+    distinguish definition from call) is a deliberate change that
+    breaks this test rather than a silent shift the audit author
+    doesn't notice.
+    """
+    (tmp_path / "caller.c").write_text(
+        "do_something(arg1, arg2);\n",
+        encoding="utf-8",
+    )
+    result = resolve_ref(parse_ref("caller.c:do_something"), tmp_path)
+    assert result.resolution is Resolution.OK, (
+        "resolver previously accepted call-at-column-zero as a "
+        "definition match (documented coarseness in resolver._C_PATTERNS). "
+        "If this assertion fails, the resolver was tightened; update "
+        "the resolver's header comment and this test together."
+    )
+
+
 def test_resolver_unknown_extension_falls_back(tmp_path: Path) -> None:
     (tmp_path / "notes.md").write_text(
         "Everyone loves moments_are_finite tests.\n",
