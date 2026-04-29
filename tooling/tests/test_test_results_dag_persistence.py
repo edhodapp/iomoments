@@ -321,6 +321,50 @@ def test_prune_nodes_preserves_disconnected_branch() -> None:
     assert len(surviving_main) == 2
 
 
+def test_prune_nodes_rejects_cycle_in_parent_chain() -> None:
+    """A corrupted DAG file with a parent-chain cycle must not loop
+    forever. UUID-based IDs make accidental cycles impossible, but
+    a hand-edited or bad-merge file could plant one — this test
+    pins the cycle-detection guard rather than crashing the audit
+    via infinite walk.
+    """
+    # Build two nodes manually with a {a → b → a} cycle in edges.
+    dag = TestResultsDAG(
+        project_name="iomoments",
+        nodes=[
+            TestResultsDAGNode(
+                id="cyc-a",
+                snapshot=TestResultsSnapshot(),
+                created_at="2026-04-29T11:00:00Z",
+            ),
+            TestResultsDAGNode(
+                id="cyc-b",
+                snapshot=TestResultsSnapshot(),
+                created_at="2026-04-29T11:01:00Z",
+            ),
+        ],
+        edges=[
+            DAGEdge(
+                parent_id="cyc-a", child_id="cyc-b",
+                decision=Decision(
+                    question="x", options=["x"], chosen="x", rationale="x",
+                ),
+                created_at="2026-04-29T11:01:00Z",
+            ),
+            DAGEdge(
+                parent_id="cyc-b", child_id="cyc-a",
+                decision=Decision(
+                    question="x", options=["x"], chosen="x", rationale="x",
+                ),
+                created_at="2026-04-29T11:02:00Z",
+            ),
+        ],
+        current_node_id="cyc-b",
+    )
+    with pytest.raises(ValueError, match="cycle detected"):
+        prune_test_results_dag_nodes(dag, keep_last_k=1)
+
+
 def test_prune_nodes_rejects_zero_or_negative_k() -> None:
     dag = TestResultsDAG(project_name="iomoments")
     with pytest.raises(ValueError, match="keep_last_k must be >= 1"):

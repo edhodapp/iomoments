@@ -433,6 +433,34 @@ def prune_and_add_result(
     return TestResultsSnapshot(results=pruned)
 
 
+def _walk_parent_chain(dag: TestResultsDAG) -> list[str]:
+    """Walk current_node_id → parent → … and return the IDs in order.
+
+    Detects cycles via a visited set so a corrupted file (hand-edit,
+    bad merge — UUID IDs make accidental cycles impossible in
+    normal operation) raises rather than spinning forever.
+    """
+    if not dag.current_node_id:
+        return []
+    parent_lookup: dict[str, str] = {
+        e.child_id: e.parent_id for e in dag.edges
+    }
+    chain: list[str] = []
+    visited: set[str] = set()
+    node_id: str | None = dag.current_node_id
+    while node_id is not None:
+        if node_id in visited:
+            raise ValueError(
+                f"cycle detected in test-results DAG parent chain "
+                f"at node_id={node_id!r}; "
+                f"refusing to prune to avoid infinite walk"
+            )
+        visited.add(node_id)
+        chain.append(node_id)
+        node_id = parent_lookup.get(node_id)
+    return chain
+
+
 def prune_test_results_dag_nodes(
     dag: TestResultsDAG,
     keep_last_k: int = _DEFAULT_KEEP_LAST_K,
@@ -463,15 +491,7 @@ def prune_test_results_dag_nodes(
     if not dag.current_node_id:
         return 0
 
-    parent_lookup: dict[str, str] = {
-        e.child_id: e.parent_id for e in dag.edges
-    }
-    chain: list[str] = []
-    node_id: str | None = dag.current_node_id
-    while node_id is not None:
-        chain.append(node_id)
-        node_id = parent_lookup.get(node_id)
-
+    chain = _walk_parent_chain(dag)
     if len(chain) <= keep_last_k:
         return 0
 
