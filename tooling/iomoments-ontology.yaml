@@ -875,6 +875,8 @@ domain_constraints:
       - "tooling/tests/test_audit_negatives.py::test_invariant_rows_with_gap_le_total_rows"
       - "tooling/tests/test_audit_negatives.py::test_invariant_total_rows_equals_iteration_length"
       - "tooling/tests/test_audit_negatives.py::test_invariant_clean_ontology_has_zero_gap_metrics"
+      - "tooling/tests/test_audit_negatives_pict.py::test_audit_combinatorial"
+      - "tooling/tests/test_audit_negatives_pict.py::test_pict_yielded_nonempty_case_set"
     status: tested
 
 # --- Performance constraints --------------------------------------------

@@ -12796,6 +12796,834 @@
       "created_at": "2026-04-29T16:15:08.106040+00:00",
       "label": "builder 2026-04-29T16:15:08Z @07a48c4+dirty",
       "integrity_hash": ""
+    },
+    {
+      "id": "6b8c786b-bbec-4f3a-a588-0cc4508b39d1",
+      "ontology": {
+        "entities": [
+          {
+            "id": "workload",
+            "name": "Workload",
+            "description": "An observed stream of I/O samples from a Linux kernel tracepoint path (block layer, VFS, etc.). The fundamental input to iomoments.\n",
+            "properties": [
+              {
+                "name": "source_tracepoint",
+                "property_type": {
+                  "kind": "str",
+                  "reference": null
+                },
+                "description": "Tracepoint name iomoments attached to.",
+                "required": true,
+                "constraints": []
+              },
+              {
+                "name": "sample_count",
+                "property_type": {
+                  "kind": "int",
+                  "reference": null
+                },
+                "description": "Total samples processed in this observation window.",
+                "required": true,
+                "constraints": []
+              }
+            ]
+          },
+          {
+            "id": "moment",
+            "name": "Moment",
+            "description": "An order-k moment (raw or log-space) of the workload's latency distribution, computed online via Pébay (D006).\n",
+            "properties": []
+          },
+          {
+            "id": "probe",
+            "name": "Probe",
+            "description": "A diagnostic measurement applied to the current workload to estimate whether moments are a trustworthy summary. D007.\n",
+            "properties": []
+          },
+          {
+            "id": "verdict",
+            "name": "Verdict",
+            "description": "The feasibility decision iomoments emits on every run (green/yellow/amber/red). D007's load-bearing artifact.\n",
+            "properties": []
+          }
+        ],
+        "relationships": [
+          {
+            "source_entity_id": "workload",
+            "target_entity_id": "moment",
+            "name": "summarized_by",
+            "cardinality": "one_to_many",
+            "description": "Each workload yields one moment per (space, order) in the active MomentRepresentation set.\n"
+          },
+          {
+            "source_entity_id": "workload",
+            "target_entity_id": "probe",
+            "name": "measured_by",
+            "cardinality": "one_to_many",
+            "description": "Each workload is passed through the full probe battery before any moment is considered for emission.\n"
+          },
+          {
+            "source_entity_id": "probe",
+            "target_entity_id": "verdict",
+            "name": "contributes_to",
+            "cardinality": "many_to_one",
+            "description": "The verdict for a workload is a function of ALL probe outputs; each probe contributes an entrance-threshold assessment.\n"
+          }
+        ],
+        "domain_constraints": [
+          {
+            "name": "pebay_update_is_numerically_stable",
+            "description": "Order-k online moment updates must use Pébay's parallel-combine formulation; naive sum-of-powers accumulation is forbidden. CURRENT COVERAGE: k=2 only (Welford mean + variance with parallel merge). Higher moments (M3, M4) land with follow-up Pébay updates; the implementation_refs below will grow then.\n",
+            "entity_ids": [
+              "moment"
+            ],
+            "expression": "moments computed via Pébay (2008) update rules only",
+            "rationale": "D006 selects Pébay; rejects sum-of-powers. k=2 shipped 2026-04-23 as the textbook-verifiable foundation before extending to k=4.\n",
+            "implementation_refs": [
+              "src/pebay.h:iomoments_summary_update",
+              "src/pebay.h:iomoments_summary_merge"
+            ],
+            "verification_refs": [
+              "tests/c/test_pebay.c:test_tiny_stream",
+              "tests/c/test_pebay.c:test_wikipedia_fixture",
+              "tests/c/test_pebay.c:test_merge_matches_single_stream",
+              "tests/c/test_pebay.c:test_self_merge_is_aliasing_safe",
+              "tests/test_pebay_ref.py::test_pebay_c_driver_passes"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "verdicts_are_first_class_output",
+            "description": "Every iomoments run emits a verdict. The verdict is NEVER silently elided, even when green — callers must be able to grep for the verdict on every record. The print_report path always calls print_verdict, which always emits the GREEN/YELLOW/AMBER/ RED tag plus per-signal breakdown.\n",
+            "entity_ids": [
+              "verdict"
+            ],
+            "expression": "",
+            "rationale": "D007 load-bearing thesis. iomoments_verdict_compute is invoked unconditionally in iomoments.c's main; the print path unconditionally emits the verdict section.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_compute",
+              "src/iomoments.c:print_verdict",
+              "src/iomoments.c:print_report"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_e2e_stationary_should_be_green",
+              "tests/c/test_verdict.c:test_overall_is_worst_of_all"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "red_verdict_refuses_moment_emission",
+            "description": "When the verdict is red, iomoments MUST NOT emit moment-based summary statistics as a recommendation. The print_verdict path emits a \"Moment-based summary refused\" block pointing the operator at DDSketch / HDR Histogram alternatives.\n",
+            "entity_ids": [
+              "verdict",
+              "moment"
+            ],
+            "expression": "",
+            "rationale": "D007 thesis; the 'honest infeasibility' core.",
+            "implementation_refs": [
+              "src/iomoments.c:print_verdict",
+              "src/iomoments_verdict.h:iomoments_verdict_compute"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_red_overall_propagates_from_constant_stream",
+              "tests/c/test_verdict.c:test_sample_count_red_when_too_few",
+              "tests/c/test_verdict.c:test_variance_sanity_red_on_constant_stream"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "moments_emitted_in_both_raw_and_log_space",
+            "description": "Each reported moment is emitted in both raw and log space so downstream consumers can select; converting between them in post is lossy.\n",
+            "entity_ids": [
+              "moment"
+            ],
+            "expression": "",
+            "rationale": "D006 dual emission.",
+            "implementation_refs": [],
+            "verification_refs": [],
+            "status": "spec"
+          },
+          {
+            "name": "linux_ebpf_only",
+            "description": "iomoments is a Linux eBPF tool. BSD classic BPF, FreeBSD eBPF port, DTrace are OUT of scope. Minimum kernel 5.15 for CO-RE. End-to-end proven 2026-04-24: the userspace binary loads the BPF object, attaches the fentry programs, reads per-CPU summaries, merges via pebay.h, prints a report. Runs cleanly inside vmtest on all four matrix kernels.\n",
+            "entity_ids": [],
+            "expression": "",
+            "rationale": "D001 platform decision.",
+            "implementation_refs": [
+              "src/iomoments.bpf.c:iomoments_rq_issue",
+              "src/iomoments.bpf.c:iomoments_rq_complete",
+              "src/iomoments.c:main"
+            ],
+            "verification_refs": [
+              "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "bpf_inline_arithmetic_is_float_free",
+            "description": "The BPF program's hot-path arithmetic MUST NOT use floating- point. The BPF verifier rejects FP instructions in tracing attach points; the kernel does not save/restore FP registers per-invocation for those contexts. src/pebay.h (double-based) stays for userspace + testing; the BPF path uses a separate fixed-point header src/pebay_bpf.h (Q32.32 m1 + int64 ns² m2 at k=2, Welford-approximate) whose results match the userspace reference on integer-valued streams within a documented tolerance (~1e-4 on μs-scale data, worse on pathological tiny-integer fixtures per the integer-ns truncation floor).\n",
+            "entity_ids": [
+              "moment",
+              "probe"
+            ],
+            "expression": "",
+            "rationale": "D011 — surfaced by the pre-commit Gemini review of src/pebay.h on 2026-04-23, captured as architectural commitment 2026-04-24. Scale decided at first-use 2026-04-24 (Phase 2 of D011); see D011's addendum for the Q32.32 m1 + int64 m2 choice and the BPF-verifier constraints that drove it (no __multi3, no signed division, __int128 rejected).\n",
+            "implementation_refs": [
+              "src/pebay_bpf.h:iomoments_summary_bpf_update",
+              "src/pebay_bpf.h:iomoments_summary_bpf_merge"
+            ],
+            "verification_refs": [
+              "tests/c/test_pebay_bpf.c:test_integer_fixture_matches_within_tolerance",
+              "tests/c/test_pebay_bpf.c:test_microsecond_sequence_agrees_within_tolerance",
+              "tests/c/test_pebay_bpf.c:test_merge_matches_single_stream"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "bpf_programs_tested_in_vm_not_host",
+            "description": "BPF programs are loaded, verifier-checked, and functionally tested inside a VM with a separate kernel instance from the developer's laptop. The host kernel is NEVER the target of `bpftool prog load` during development or CI. Orchestration via vmtest; `make bpf-test-vm` loads the compiled BPF object into the guest kernel and reports the verifier's verdict. `make bpf-test-vm-matrix` sweeps the full D001-floor-through- recent-stable kernel set (5.15 / 6.1 / 6.6 / 6.12, all built with vmtest's fedora38 preset) — all four accepted the iomoments.bpf.o raw_tracepoint program on 2026-04-24.\n",
+            "entity_ids": [],
+            "expression": "",
+            "rationale": "D012 — containers share the host kernel, so a BPF program that passes the verifier but hangs a hot tracepoint or exploits a verifier bug can still crash the laptop. Only a VM provides real crash isolation. Proven end-to-end 2026-04-24 on all four matrix kernels; sweep log at tooling/vmtest/matrix-sweep-2026-04-24.log.\n",
+            "implementation_refs": [
+              "Makefile:bpf-test-vm",
+              "Makefile:bpf-test-vm-matrix"
+            ],
+            "verification_refs": [
+              "tests/test_bpf_skeleton.py::test_bpf_verify_passes",
+              "tooling/vmtest/matrix-sweep-2026-04-24.log"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "bpf_safe_multiprecision_arithmetic",
+            "description": "The BPF k=4 hot path computes products and sums whose intermediate magnitude exceeds s64. The kernel BPF verifier rejects compiler-emitted __multi3 / __divti3 libcalls (which would naturally arise from __int128 expressions), so iomoments builds 128-bit signed integer arithmetic by hand from 64-bit primitives. Each primitive is validated against the compiler's __int128 extension over hand-picked boundary cases plus a deterministic LCG sweep of 2000 trials per primitive.\n",
+            "entity_ids": [
+              "moment"
+            ],
+            "expression": "All multi-precision arithmetic in the BPF compile path uses hand-rolled 64-bit ops only. No __multi3, __divti3, __int128 libcalls present in the BPF object.\n",
+            "rationale": "Discovered while extending pebay_bpf.h to k=4: m3 / m4 and their per-sample products exceed s64 for realistic workloads. Pivoted from \"punt to userspace\" to \"hand-rolled int128\" after the m2->s128 attempt revealed BPF verifier complexity is the true constraint, not memory or CPU.\n",
+            "implementation_refs": [
+              "src/u128.h:u64_mul_u64",
+              "src/u128.h:s64_mul_s64",
+              "src/u128.h:s128_add",
+              "src/u128.h:s128_sub",
+              "src/u128.h:s128_mul_u64",
+              "src/u128.h:s128_mul_s64",
+              "src/u128.h:s128_div_u64",
+              "src/u128.h:u128_div_u64_inner",
+              "src/u128.h:s128_to_double"
+            ],
+            "verification_refs": [
+              "tests/c/test_u128.c:test_u64_mul_u64_lcg_sweep",
+              "tests/c/test_u128.c:test_s64_mul_s64_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_add_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_sub_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_mul_u64_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_mul_s64_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_div_u64_lcg_sweep",
+              "tests/c/test_u128.c:test_s128_to_double"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "moments_of_moments_architecture",
+            "description": "iomoments is built from one primitive (Pébay/Welford running moments) applied at two levels: Level 1 in BPF accumulates windowed moments of latency samples within a short window; Level 2 in userspace runs the same primitive on the time series of windowed Level-1 summaries. Aliasing and non- stationarity present as departures of the Level-2 statistics from CLT predictions for stationary Nyquist-met data.\n",
+            "entity_ids": [
+              "moment",
+              "probe"
+            ],
+            "expression": "The temporal-coherence diagnostic is built from recursive Pébay, not from FFT or a separate spectral subsystem.\n",
+            "rationale": "D013. Resolves the temporal_coherence_sidecar open question. The same primitive at two levels is the architectural commitment — separate subsystems are explicitly rejected.\n",
+            "implementation_refs": [
+              "src/iomoments_level2.h:iomoments_level2_analyze",
+              "src/iomoments_spectral.h:iomoments_spectral_sweep",
+              "src/iomoments.c:run_drain_loop"
+            ],
+            "verification_refs": [
+              "tests/c/test_level2.c:test_confidence_function_calibration",
+              "tests/c/test_level2.c:test_stationary_gaussian_high_confidence",
+              "tests/c/test_level2.c:test_drifting_mean_low_confidence",
+              "tests/c/test_level2.c:test_aliased_periodic_low_confidence",
+              "tests/c/test_verdict.c:test_spectral_sweep_sinusoid_at_period_4"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "top_k_reservoir_for_order_statistics",
+            "description": "Order-statistic-based diagnostic signals (Hill tail-index in this commit; KS tail goodness-of-fit later) require access to the largest K samples seen, not just the moments. iomoments maintains a per-CPU bounded reservoir (K=32 chosen as the sweet spot between BPF map size, verifier-cheap O(K) insert, and Hill estimator standard error) updated alongside the Pébay summary on every BPF block-layer event. Userspace drains both maps each window and merges per-CPU top-Ks into a per-window top-K; verdict-compute merges all windows into a global top-K for Hill.\n",
+            "entity_ids": [
+              "moment",
+              "probe"
+            ],
+            "expression": "Order-statistic signals operate over a fixed-size bounded reservoir (K=32) maintained per-CPU in BPF. No ringbuf, no unbounded streaming.\n",
+            "rationale": "Bounded per-CPU reservoir matches the \"in-kernel aggregation\" architecture iomoments has consistently chosen. BPF verifier acceptance pinned by the K-power-of-2 mask on reservoir-loaded indices (the verifier doesn't trust scalars loaded from a map and treats them as unbounded; masking gives a tight upper bound).\n",
+            "implementation_refs": [
+              "src/iomoments_topk.h:iomoments_topk_insert",
+              "src/iomoments_topk.h:iomoments_topk_merge",
+              "src/iomoments_topk.h:iomoments_topk_recompute_min",
+              "src/iomoments.bpf.c:iomoments_rq_complete",
+              "src/iomoments.c:drain_and_reset_topk"
+            ],
+            "verification_refs": [
+              "tests/c/test_topk.c:test_init_zero",
+              "tests/c/test_topk.c:test_insert_below_capacity_keeps_all",
+              "tests/c/test_topk.c:test_insert_at_capacity_keeps_top_k",
+              "tests/c/test_topk.c:test_insert_random_keeps_top_k",
+              "tests/c/test_topk.c:test_merge_keeps_top_k_of_union"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "periodic_per_cpu_drain",
+            "description": "Userspace periodically drains the per-CPU iomoments_summary_bpf map at a configurable cadence (--window in iomoments.c, default 100 ms), merges each drain into a single iomoments_window snapshot, resets the per-CPU values to zero, and pushes the snapshot onto a time-indexed ring. The ring is the input to Level 2 / spectral-sweep / verdict analysis.\n",
+            "entity_ids": [
+              "moment",
+              "probe"
+            ],
+            "expression": "The per-CPU map is drained at cadence W; the ring of windowed snapshots is the substrate for D013's recursive Pébay.\n",
+            "rationale": "D013 requires a time series of Level-1 summaries; the drain cadence W defines the base sample rate for Level-2 analysis. Periodic per-CPU drain also mitigates the m2 saturation floor by limiting any one accumulator's lifetime to one window.\n",
+            "implementation_refs": [
+              "src/iomoments.c:run_drain_loop",
+              "src/iomoments.c:drain_and_reset_summaries",
+              "src/iomoments_level2.h"
+            ],
+            "verification_refs": [
+              "tests/c/test_level2.c:test_stationary_gaussian_high_confidence",
+              "tests/c/test_level2.c:test_drifting_mean_low_confidence"
+            ],
+            "status": "implemented"
+          },
+          {
+            "name": "audit_detects_documented_negative_cases",
+            "description": "The ontology audit (D010) is itself the gate that catches \"claim X is tested\" lies. The audit is therefore a load-bearing claim that must itself be tested — one specific failing test per documented forbidden combination. D013's moments-of-moments recursive primitive applied to the project's own discipline tooling: a probe of the probe. If the audit's own tests pass, the gate works; if any fail, the gate has regressed and the whole ontology-traceability story underneath it becomes suspect.\n",
+            "entity_ids": [],
+            "expression": "",
+            "rationale": "D010 (audit-ontology as closing gate) + D013 (recursive primitive). Without this row, the audit could degrade silently and every other \"tested\" claim would inherit the silent degradation. With this row, audit drift fails the audit gate itself.\n",
+            "implementation_refs": [
+              "tooling/src/audit_ontology/audit.py:run_audit",
+              "tooling/src/audit_ontology/resolver.py:resolve_ref",
+              "tooling/src/audit_ontology/consistency.py:check_status_refs_consistency"
+            ],
+            "verification_refs": [
+              "tooling/tests/test_audit_negatives.py::test_negative_tested_with_empty_verif_refs",
+              "tooling/tests/test_audit_negatives.py::test_negative_implemented_missing_impl_refs",
+              "tooling/tests/test_audit_negatives.py::test_negative_implemented_missing_verif_refs",
+              "tooling/tests/test_audit_negatives.py::test_negative_deviation_without_rationale",
+              "tooling/tests/test_audit_negatives.py::test_negative_verif_ref_file_missing",
+              "tooling/tests/test_audit_negatives.py::test_negative_impl_ref_file_missing",
+              "tooling/tests/test_audit_negatives.py::test_negative_symbol_absent_from_real_file",
+              "tooling/tests/test_audit_negatives.py::test_negative_symbol_only_in_python_comment",
+              "tooling/tests/test_audit_negatives.py::test_negative_symbol_only_in_c_comment",
+              "tooling/tests/test_audit_negatives.py::test_negative_python_substring_of_longer_identifier",
+              "tooling/tests/test_audit_negatives.py::test_negative_c_substring_of_longer_identifier",
+              "tooling/tests/test_audit_negatives.py::test_negative_multiple_gaps_in_one_row",
+              "tooling/tests/test_audit_negatives.py::test_negative_iterates_all_constraint_kinds",
+              "tooling/tests/test_audit_negatives.py::test_invariant_summary_refs_match_externally_known_ground_truth",
+              "tooling/tests/test_audit_negatives.py::test_invariant_rows_with_gap_le_total_rows",
+              "tooling/tests/test_audit_negatives.py::test_invariant_total_rows_equals_iteration_length",
+              "tooling/tests/test_audit_negatives.py::test_invariant_clean_ontology_has_zero_gap_metrics",
+              "tooling/tests/test_audit_negatives_pict.py::test_audit_combinatorial",
+              "tooling/tests/test_audit_negatives_pict.py::test_pict_yielded_nonempty_case_set"
+            ],
+            "status": "tested"
+          }
+        ],
+        "performance_constraints": [
+          {
+            "name": "pebay_update_cycles_per_sample",
+            "description": "Per-sample Pébay update cost in the BPF hot path. Ceiling derived from the budget for keeping iomoments on the hot path of a high-rate tracepoint without dominating it.\n",
+            "entity_ids": [
+              "moment"
+            ],
+            "metric": "pebay_update_cycles",
+            "budget": 200.0,
+            "unit": "cycles",
+            "direction": "max",
+            "measured_via": "",
+            "rationale": "Placeholder budget; refine with first measurement.",
+            "implementation_refs": [],
+            "verification_refs": [],
+            "status": "spec"
+          },
+          {
+            "name": "probe_phase_overhead",
+            "description": "Diagnostic probe phase must not dominate the BPF hot path. The diagnostic layer is load-bearing (D007) but can't be so expensive that users disable it.\n",
+            "entity_ids": [
+              "probe"
+            ],
+            "metric": "probe_overhead_ns",
+            "budget": 500.0,
+            "unit": "ns",
+            "direction": "max",
+            "measured_via": "",
+            "rationale": "D007 diagnostic layer must stay cheap enough to stay on.",
+            "implementation_refs": [],
+            "verification_refs": [],
+            "status": "spec"
+          },
+          {
+            "name": "per_cpu_update_bytes",
+            "description": "Per-CPU Pébay running summary must fit in one cache line so updates don't pull neighbor data.\n",
+            "entity_ids": [
+              "moment"
+            ],
+            "metric": "per_cpu_summary_bytes",
+            "budget": 64.0,
+            "unit": "bytes",
+            "direction": "max",
+            "measured_via": "",
+            "rationale": "Cache-line-aware accumulator sizing.",
+            "implementation_refs": [],
+            "verification_refs": [],
+            "status": "spec"
+          }
+        ],
+        "diagnostic_signals": [
+          {
+            "name": "carleman_partial_sum",
+            "description": "Carleman (1926) partial-sum test for moment determinacy. Large partial sums imply the moment problem is determinate and the moments uniquely characterize the distribution.\n",
+            "method": "S_n = sum_{k=1..n} m_{2k}^{-1/(2k)}. iomoments tracks moments to k=4; the implementation evaluates only the first two terms and uses the *ratio* of term-2 to term-1 as a tail-weight proxy for Carleman-series decay. Carleman: S_infty = infty implies determinacy.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "ratio > 0.5 (light tail; consistent with divergent S)",
+              "yellow": "ratio in (0.3, 0.5] (moderate tail; caveat user)",
+              "amber": "ratio <= 0.3 (heavy tail; possible moment-indeterminacy)"
+            },
+            "rationale": "D007 thesis; Carleman 1926 classical result. With only k=4 moments the signal is a partial-sum proxy, not a definitive determinacy test. Doesn't go RED on its own — kurtosis_sanity already RED-flags degenerate spikes. Per D014, when the loaded BPF variant is k=3 (m4 not maintained), the evaluator reports YELLOW with insufficient-moment-order rationale rather than computing nonsense from m4=0.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_eval_carleman"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_carleman_green_on_gaussian",
+              "tests/c/test_verdict.c:test_carleman_amber_on_heavy_tail_spike",
+              "tests/c/test_verdict.c:test_carleman_yellow_on_constant_stream",
+              "tests/c/test_verdict.c:test_k3_carleman_yellow_insufficient_order"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "hankel_condition_number",
+            "description": "Hankel matrix conditioning as an indicator of effective atomic decomposition (Curto & Fialkow 1991). Ill-conditioned Hankel matrix implies the moment sequence is degenerate in practice.\n",
+            "method": "iomoments tracks moments to k=4, so the implementation forms the 3×3 central-moment Hankel and uses its determinant normalized by mu_2^3 as a conditioning proxy: kappa = (mu_2*mu_4 - mu_3^2 - mu_2^3) / mu_2^3. Equivalent to (excess kurtosis + 2) - skewness^2.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "kappa > 0.5 (well-conditioned; supports continuous)",
+              "yellow": "kappa in (0.1, 0.5] (constrained shape)",
+              "amber": "kappa <= 0.1 OR kappa > 100 (rank-deficient OR pathological)"
+            },
+            "rationale": "D007 thesis; Curto & Fialkow 1991. Determinant proxy chosen over full eigenvalue computation because all the inputs are already on hand and the determinant has a clean closed form at k=4. Per D014, when the loaded BPF variant is k=3 (m4 not maintained), the evaluator reports YELLOW with insufficient-moment-order rationale rather than computing a meaningless determinant from m4=0.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_eval_hankel"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_hankel_green_on_gaussian",
+              "tests/c/test_verdict.c:test_hankel_amber_on_two_atom_distribution",
+              "tests/c/test_verdict.c:test_hankel_amber_on_heavy_tail_spike",
+              "tests/c/test_verdict.c:test_hankel_yellow_on_constant_stream",
+              "tests/c/test_verdict.c:test_k3_hankel_yellow_insufficient_order"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "hill_tail_index",
+            "description": "Hill (1975) tail-index estimator for heavy-tailed I/O distributions. alpha <= moment order implies that moment does not exist in the population, so the sample moment is not a summary of a meaningful quantity. The only signal that goes RED on a continuous distribution — the others (variance_sanity, kurtosis_sanity, sample_count) RED only on degenerate inputs.\n",
+            "method": "Per-CPU top-K reservoir (K=32) maintained in BPF alongside the summary; userspace drains every window into a per-window topk; verdict-compute merges all windows into a global top-K and computes: alpha_hat = 1 / ((1/(K-1)) * sum_{i=1..K-1} ln(X_(i) / X_(K))) where X_(1) >= ... >= X_(K) are the order statistics.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "alpha > 2.5 (light tail; M2..M4 well-defined)",
+              "yellow": "2.0 < alpha <= 2.5 (kurtosis-edge; estimator noisy)",
+              "amber": "1.0 < alpha <= 2.0 (heavy tail; kurtosis non-existent)",
+              "red": "alpha <= 1.0 (mean non-existent; moments wrong primitive)"
+            },
+            "rationale": "D007 thesis; Hill 1975; Embrechts et al. 1997. Calibrated against synthetic Pareto(α) samples — α=1, 2, 3.5 fixtures land in the predicted bands within standard error α/√k ≈ α/5.66 at K=32.\n",
+            "implementation_refs": [
+              "src/iomoments_topk.h:iomoments_topk_insert",
+              "src/iomoments_topk.h:iomoments_topk_merge",
+              "src/iomoments_topk.h:iomoments_hill_estimator",
+              "src/iomoments_verdict.h:iomoments_verdict_eval_hill",
+              "src/iomoments.bpf.c:iomoments_rq_complete"
+            ],
+            "verification_refs": [
+              "tests/c/test_topk.c:test_hill_pareto_alpha_2",
+              "tests/c/test_topk.c:test_hill_pareto_alpha_1",
+              "tests/c/test_topk.c:test_hill_pareto_alpha_3_5",
+              "tests/c/test_verdict.c:test_hill_green_on_light_tail",
+              "tests/c/test_verdict.c:test_hill_amber_on_heavy_tail",
+              "tests/c/test_verdict.c:test_hill_red_on_very_heavy_tail",
+              "tests/c/test_verdict.c:test_hill_yellow_on_empty_topk"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "jb_normality",
+            "description": "Jarque-Bera (1980) test of normality. Asks \"are the moments specifically Gaussian-like?\" — distinct from Hankel/Carleman (\"is the moment sequence valid / determinate?\") and Hill (\"is the tail too heavy for a finite-mean distribution?\"). Moments-only; runs at every drain on the running m1..m4.\n",
+            "method": "JB = n/6 * (skewness^2 + excess_kurtosis^2 / 4). Under the Gaussian H_0, JB → chi^2(2) asymptotically. The chi^2(2) survival function is exp(-x/2), giving p = exp(-JB/2). Pure function of m1..m4 — no buffering, no histogram, no ring.\n",
+            "unit": "probability",
+            "thresholds": {
+              "green": "p > 0.05 (consistent with Gaussian)",
+              "yellow": "0.001 < p <= 0.05 (mild non-normality)",
+              "amber": "p <= 0.001 (strongly non-Gaussian; Cornish-Fisher unsafe)"
+            },
+            "rationale": "D007 thesis; Jarque & Bera 1980. Replaces the originally-spec'd ks_lognormal_pvalue signal. The histogram-based KS path was rejected 2026-04-25 — buffered substrate violates iomoments' moments-only project identity. JB asks essentially the same question (does the distribution match a reference family?) using only m1..m4. Below n = 8 the asymptotic chi^2(2) approximation is unreliable; emit YELLOW with insufficient- data rationale rather than a misleading p-value. Per D014, when the loaded BPF variant is k=3 (m4 not maintained), the evaluator reports YELLOW with insufficient-moment-order rationale.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_eval_jb"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_jb_green_on_gaussian",
+              "tests/c/test_verdict.c:test_jb_amber_on_strong_skew",
+              "tests/c/test_verdict.c:test_jb_yellow_on_low_n",
+              "tests/c/test_verdict.c:test_k3_jb_yellow_insufficient_order"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "edgeworth_pdf_consistency",
+            "description": "Self-consistency check on the moment-truncated Edgeworth PDF reconstruction. Asks \"do the moments imply a *valid* probability density?\" — distinct from Hankel (\"is there *any* measure with these moments?\"). Moments-only; pure function of m1..m4 evaluated on a standardized z-grid.\n",
+            "method": "Truncated Edgeworth series: f(z) ≈ φ(z) · [1 + (γ_1/6)·H_3(z) + (γ_2/24)·H_4(z)\n                 + (γ_1^2/72)·H_6(z)]\nwhere φ is the standard normal PDF and H_n are probabilist's Hermite polynomials. Evaluate the bracketed factor on a 201-point grid across z ∈ [-5, +5] (deliberately bounded to where the Gaussian baseline φ(z) is numerically meaningful; outside that window the reconstructed PDF f(z) = φ(z)·factor(z) is ε-small regardless of factor sign, and the Hermite z^6 term spuriously drives factor negative at |z| ≥ 6 on essentially any non-exactly-Gaussian sample) and track its minimum. Distributions pathological enough to need detection push the root *into* [-5, 5] (spike fixture: factor ≈ -75 at z = 0). The signal is naturally binary: factor > 0 everywhere ⇒ valid density; factor ≤ 0 anywhere ⇒ invalid density (γ_1, γ_2 too extreme for the m1/m2 baseline they sit on).\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "min factor > 0 (truncated PDF is everywhere positive)",
+              "amber": "min factor ≤ 0 (truncated PDF goes negative; reconstruction invalid)",
+              "yellow": "n < 8 OR m_2 ≤ 0 (cannot standardize)"
+            },
+            "rationale": "D007 thesis; Edgeworth 1905; complements Hankel-conditioning from a different angle. Hankel asks whether *some* measure has these moments; Edgeworth asks whether the specific moment- truncated reconstruction is itself a valid density. Both questions are asked at every drain from the same running m1..m4. No YELLOW band on a successful evaluation: a PDF is either valid or it isn't. Per D014, when the loaded BPF variant is k=3 (m4 not maintained), the evaluator reports YELLOW with insufficient-moment-order rationale; the Hermite H_4 / H_6 corrections are unconstrained without m4 so PDF reconstruction has no meaning.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_eval_edgeworth"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_edgeworth_green_on_gaussian",
+              "tests/c/test_verdict.c:test_edgeworth_amber_on_extreme_kurtosis",
+              "tests/c/test_verdict.c:test_edgeworth_yellow_on_constant_stream",
+              "tests/c/test_verdict.c:test_k3_edgeworth_yellow_insufficient_order"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "half_split_moment_stability",
+            "description": "Split the observation window in half and compare moments. Large divergence implies non-stationarity or aliasing; small divergence bounds per-moment noise floor.\n",
+            "method": "Split the iomoments_window ring at the midpoint, aggregate each half via pebay.h's parallel-combine, compare. Two metrics reported: mean_shift_in_sd (|m1_a - m1_b| / sqrt((var_a + var_b)/2)) and var_ratio (max(var_a, var_b) / min). Status driven by the worst of the two.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "mean_shift < 0.5 sigma_pooled AND var_ratio <= 2",
+              "yellow": "mean_shift in [0.5, 1] sigma_pooled OR var_ratio in (2, 4]",
+              "amber": "mean_shift > 1 sigma_pooled OR var_ratio > 4"
+            },
+            "rationale": "D007 thesis; classic split-half reliability adapted. No red band because severe non-stationarity signals a measurement problem, not an infeasibility of moments per se — the right response is to fix the window or partition the workload, which is what the amber verdict's output_policy recommends. Red tier belongs to signals that prove moments don't exist (heavy tail, moment-indeterminate), not to measurement artifacts.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_eval_half_split"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_half_split_green_on_stationary",
+              "tests/c/test_verdict.c:test_half_split_amber_on_drift",
+              "tests/c/test_verdict.c:test_half_split_yellow_when_too_few"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "nyquist_confidence",
+            "description": "Level 2 (D013) Nyquist-met confidence. Compares variance of the windowed-mean stream Var(m1_i) to the CLT prediction sigma^2_global / n_per_window. Aliasing or non-stationarity drives the ratio away from 1; the confidence score is a symmetric Gaussian-of-log-ratio in [0, 1].\n",
+            "method": "confidence = exp( -1/2 * (log_2(Var_obs / Var_pred))^2 ) Value 1 at perfect agreement, ~0.6 at 2x deviation, ~0.14 at 4x, ~0.01 at 8x. Symmetric: dips and inflations are penalized equally.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "confidence >= 0.5",
+              "yellow": "0.1 <= confidence < 0.5",
+              "amber": "confidence < 0.1 (aliasing or strong non-stationarity)"
+            },
+            "rationale": "D013; the second-half-of-iomoments diagnostic. CLT divergence is the structural signal — moments are honest only when the windowed-mean stream has the variance the CLT predicts.\n",
+            "implementation_refs": [
+              "src/iomoments_level2.h:iomoments_level2_analyze",
+              "src/iomoments_level2.h:iomoments_level2_confidence",
+              "src/iomoments_verdict.h:iomoments_verdict_eval_nyquist"
+            ],
+            "verification_refs": [
+              "tests/c/test_level2.c:test_confidence_function_calibration",
+              "tests/c/test_level2.c:test_stationary_gaussian_high_confidence",
+              "tests/c/test_level2.c:test_drifting_mean_low_confidence",
+              "tests/c/test_level2.c:test_aliased_periodic_low_confidence",
+              "tests/c/test_verdict.c:test_nyquist_green_on_high_confidence",
+              "tests/c/test_verdict.c:test_nyquist_amber_on_low_confidence"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "autocorr_residual",
+            "description": "Level 2 (D013) lag-k Pearson autocorrelation of the windowed- mean time series at lags {1, 2, 4, 8}. For stationary Nyquist- met data, all lag autocorrelations are ~0 within sampling noise; persistent peaks at lag k indicate periodicity at period k * W.\n",
+            "method": "rho_k = mean((m1_i - mu)(m1_{i+k} - mu)) / Var(m1). Signal status driven by max(|rho_k|) across the fixed lag set.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "max(|rho_k|) <= 0.3",
+              "yellow": "max(|rho_k|) in (0.3, 0.5]",
+              "amber": "max(|rho_k|) > 0.5 (periodic structure at lag*W)"
+            },
+            "rationale": "D013 second-stage Pébay diagnostic; complements nyquist_confidence by localizing the period when periodicity is at exactly k*W for k in the fixed lag set.\n",
+            "implementation_refs": [
+              "src/iomoments_level2.h:iomoments_level2_autocorr",
+              "src/iomoments_level2.h:iomoments_level2_analyze",
+              "src/iomoments_verdict.h:iomoments_verdict_eval_autocorr"
+            ],
+            "verification_refs": [
+              "tests/c/test_level2.c:test_stationary_gaussian_high_confidence",
+              "tests/c/test_level2.c:test_drifting_mean_low_confidence",
+              "tests/c/test_verdict.c:test_autocorr_amber_on_strong_periodicity",
+              "tests/c/test_verdict.c:test_autocorr_green_on_low_correlation"
+            ],
+            "status": "tested"
+          },
+          {
+            "name": "spectral_flatness_sweep",
+            "description": "Level 2 (D013) spectral-flatness sweep. Sweeps virtual window length W' = k * W for k in {1, 2, 4, 8, ...}, re-aggregates the base-window ring at each k, and computes Var(m1_virtual) / Var_clt at each W'. The minimum ratio across the sweep + the W' at which it occurred *localizes* hidden periodicity that a single-W ratio cannot detect.\n",
+            "method": "For each k, merge every k consecutive base snapshots into a virtual window, compute Var across virtuals, compare to sigma^2_global / n_per_virtual. The minimum ratio across the sweep is the signal value; the corresponding W' is the localized aliasing period.\n",
+            "unit": "dimensionless",
+            "thresholds": {
+              "green": "min ratio > 0.5 (smooth across scales)",
+              "yellow": "min ratio in (0.2, 0.5] (mild structure at some scale)",
+              "amber": "min ratio <= 0.2 (clear aliasing at the W' of min)"
+            },
+            "rationale": "D013 fully realizes the moments-of-moments architecture; spectral_flatness_sweep is the period-localization companion to nyquist_confidence. Resolves the temporal_coherence_sidecar open question.\n",
+            "implementation_refs": [
+              "src/iomoments_spectral.h:iomoments_spectral_sweep",
+              "src/iomoments_verdict.h:iomoments_verdict_eval_spectral"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_spectral_sweep_stationary_smooth",
+              "tests/c/test_verdict.c:test_spectral_sweep_sinusoid_at_period_4",
+              "tests/c/test_verdict.c:test_spectral_sweep_insufficient_data"
+            ],
+            "status": "tested"
+          }
+        ],
+        "verdict_nodes": [
+          {
+            "kind": "green",
+            "description": "Moments are a trustworthy shape summary for this workload. Emission proceeds with the expected error budget from the diagnostic layer.\n",
+            "entrance_criteria": [
+              "carleman_partial_sum: green",
+              "hankel_condition_number: green",
+              "hill_tail_index: green",
+              "ks_lognormal_pvalue: green OR yellow",
+              "half_split_moment_stability: green"
+            ],
+            "output_policy": "Emit moments with computed error bounds.",
+            "rationale": "D007 green tier. Implementation aggregation: overall = worst-of-all signal statuses; GREEN requires every signal green or yellow with the documented relaxation.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_compute",
+              "src/iomoments_verdict.h:iomoments_verdict_status_name"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_status_names",
+              "tests/c/test_verdict.c:test_e2e_stationary_should_be_green"
+            ],
+            "status": "tested"
+          },
+          {
+            "kind": "yellow",
+            "description": "Moments are informative but the diagnostic layer detected structure the moment representation misses (bimodality or marginal determinacy).\n",
+            "entrance_criteria": [
+              "one or more signals in yellow band; none in amber/red"
+            ],
+            "output_policy": "Emit moments with an explicit caveat naming the signal(s) that flagged marginal. Caller can proceed or escalate.\n",
+            "rationale": "D007 yellow tier. iomoments_verdict_compute promotes overall to YELLOW when any signal goes yellow and no signal is amber/red; print_verdict displays the per-signal rationales so operators see which signal(s) caveated.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_compute",
+              "src/iomoments_verdict.h:iomoments_verdict_push"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_overall_is_worst_of_all",
+              "tests/c/test_verdict.c:test_sample_count_yellow_in_band"
+            ],
+            "status": "tested"
+          },
+          {
+            "kind": "amber",
+            "description": "Moments are likely biased — aliasing, sampling-window drift, or non-stationarity suspected. A measurement fix is usually the right response rather than interpreting the numbers as-is.\n",
+            "entrance_criteria": [
+              "half_split_moment_stability: amber",
+              "OR hill_tail_index: amber",
+              "OR nyquist_confidence: amber (Level 2, D013)",
+              "OR autocorr_residual: amber (Level 2)",
+              "OR spectral_flatness_sweep: amber (Level 2 sweep)",
+              "OR carleman_partial_sum: amber (heavy tail proxy)",
+              "OR hankel_conditioning: amber (rank-deficient or pathological)"
+            ],
+            "output_policy": "Emit moments with a diagnostic recommendation (widen window, re-sample, partition the workload). The localized period from spectral_flatness_sweep is included when that signal fires.\n",
+            "rationale": "D007 amber tier. Worst-of-all aggregation: any AMBER signal promotes overall to AMBER. The print_verdict layer surfaces every AMBER signal with its rationale string.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_compute"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_overall_is_worst_of_all",
+              "tests/c/test_verdict.c:test_half_split_amber_on_drift"
+            ],
+            "status": "tested"
+          },
+          {
+            "kind": "red",
+            "description": "Moments are the wrong primitive for this workload. Typically this fires on heavy-tailed distributions where the variance or higher moments do not exist in the population, or on degenerate streams (constant-value, near-zero variance).\n",
+            "entrance_criteria": [
+              "hill_tail_index: red (α <= 1; mean non-existent)",
+              "OR carleman_partial_sum: red (not currently emitted; reserved)",
+              "OR hankel_condition_number: red (not currently emitted; reserved)",
+              "OR ks_lognormal_pvalue: red AND raw-space also rejected",
+              "OR variance_sanity: red (constant stream)",
+              "OR sample_count: red (insufficient n)",
+              "OR kurtosis_sanity: red (degenerate spike)"
+            ],
+            "output_policy": "REFUSE moment-based summary. iomoments.c print_verdict emits a Recommendation block pointing at DDSketch / HDR Histogram as alternative primitives appropriate to the workload's shape.\n",
+            "rationale": "D007 red tier — the honest infeasibility core. Multiple signals can drive RED (each pinned to its specific failure mode); the print path centralizes the alternative-tool recommendation.\n",
+            "implementation_refs": [
+              "src/iomoments_verdict.h:iomoments_verdict_compute",
+              "src/iomoments.c:print_verdict"
+            ],
+            "verification_refs": [
+              "tests/c/test_verdict.c:test_sample_count_red_when_too_few",
+              "tests/c/test_verdict.c:test_variance_sanity_red_on_constant_stream",
+              "tests/c/test_verdict.c:test_kurtosis_sanity_red_on_degenerate_spike"
+            ],
+            "status": "tested"
+          }
+        ],
+        "moment_representations": [
+          {
+            "space": "raw",
+            "order": 1,
+            "description": "Raw-space mean of the latency distribution.",
+            "notes": ""
+          },
+          {
+            "space": "raw",
+            "order": 2,
+            "description": "Raw-space variance.",
+            "notes": ""
+          },
+          {
+            "space": "raw",
+            "order": 3,
+            "description": "Raw-space skewness (third central moment).",
+            "notes": ""
+          },
+          {
+            "space": "log",
+            "order": 1,
+            "description": "Log-space mean.",
+            "notes": "Log-space converges faster on log-normal-ish I/O distributions (D006). Mean of log == geometric mean of raw; useful as a tail- robust location estimate.\n"
+          },
+          {
+            "space": "log",
+            "order": 2,
+            "description": "Log-space variance.",
+            "notes": ""
+          },
+          {
+            "space": "log",
+            "order": 3,
+            "description": "Log-space skewness — tail-shape indicator.",
+            "notes": ""
+          }
+        ],
+        "modules": [
+          {
+            "name": "tests.test_pebay_ref",
+            "responsibility": "Python numerical oracle (numpy + scipy) validating the Pébay update rules against a naïve high-precision implementation and against scipy descriptive stats. Not shipped — test-only.\n",
+            "classes": [],
+            "functions": [],
+            "dependencies": [
+              "numpy",
+              "scipy"
+            ],
+            "test_strategy": "Behavioral tests first (given known input, the moments match textbook values). Unit tests fill in branch coverage as the oracle grows.\n",
+            "status": "in_progress"
+          },
+          {
+            "name": "iomoments_ontology",
+            "responsibility": "The formal verifiable requirements artifact for iomoments (D009). Pydantic schema + DAG persistence + advisory-locked transactions.\n",
+            "classes": [],
+            "functions": [],
+            "dependencies": [
+              "pydantic",
+              "pyyaml"
+            ],
+            "test_strategy": "Round-trip tests on every schema shape; 5-process concurrent test for dag_transaction; contention assertion on flock.\n",
+            "status": "in_progress"
+          }
+        ],
+        "data_models": [],
+        "external_dependencies": [
+          {
+            "name": "linux-kernel",
+            "version_constraint": ">=5.15",
+            "reason": "CO-RE + BTF required (D001)."
+          },
+          {
+            "name": "libbpf",
+            "version_constraint": ">=1.0",
+            "reason": "Userspace loader runtime (D005)."
+          },
+          {
+            "name": "clang",
+            "version_constraint": ">=18",
+            "reason": "Only clang cross-compiles to -target bpf (D008)."
+          },
+          {
+            "name": "pydantic",
+            "version_constraint": ">=2.6",
+            "reason": "Ontology schema shape (D009)."
+          }
+        ],
+        "open_questions": [
+          {
+            "id": "entrance_criteria_structuring",
+            "text": "Should VerdictNode.entrance_criteria be structured (list of BaseModel with signal_ref + band_ref + op) or remain free-text?\n",
+            "context": "Phase 4 clean-Claude review flagged that the test data already encodes a \"signal: band\" micro-syntax inside strings. D021 says draft-first, crystallize on friction. Decide when Phase 6 audit tool first tries to parse the strings.\n",
+            "priority": "medium",
+            "resolved": false,
+            "resolution": ""
+          },
+          {
+            "id": "diagnostic_signal_moment_representation_link",
+            "text": "Should DiagnosticSignal and MomentRepresentation have a direct reference field (which signals gate which representations)? Today the relationship lives in DomainConstraint descriptions as free-text.\n",
+            "context": "Relevant when Phase 6 audit tool wants to reason about \"the fourth log-space moment requires signal X in band Y\" queries.\n",
+            "priority": "low",
+            "resolved": false,
+            "resolution": ""
+          },
+          {
+            "id": "performance_constraint_tolerance",
+            "text": "Should PerformanceConstraint carry a tolerance / acceptable- variance field? Perf baselines naturally drift ±a few percent; hard equality on budget makes flaky perf tests.\n",
+            "context": "Flagged in Phase 2 review. Deferred because adding unilaterally would diverge iomoments from fireasmserver's shape and harm cross-project audit unification. Lands in both projects together if real friction emerges.\n",
+            "priority": "low",
+            "resolved": false,
+            "resolution": ""
+          },
+          {
+            "id": "percentile_as_first_class_perf_field",
+            "text": "Should PerformanceConstraint carry a percentile field (p50/p99) or keep encoding percentile in the metric string?\n",
+            "context": "Flagged in Phase 2 review. Same cross-project coordination concern as tolerance.\n",
+            "priority": "low",
+            "resolved": false,
+            "resolution": ""
+          },
+          {
+            "id": "temporal_coherence_sidecar",
+            "text": "RESOLVED 2026-04-25 by D013. The sidecar is built from recursive Pébay over the time series of windowed Level-1 summaries (one primitive at two levels), not from FFT or a separate spectral subsystem. Concrete signal set in the ontology now: nyquist_confidence (variance-of-windowed-mean vs CLT), autocorr_residual (lag-k Pearson autocorrelation), spectral_flatness_sweep (variance-ratio across W'), and half_split_moment_stability (already named pre-resolution). Inter-arrival CV is not implemented — folded into the autocorr / spectral signals which carry the same information for stationarity diagnosis.\n",
+            "context": "D007 named the sidecar; D013 chose its architecture. The moments-of-moments framing (one primitive applied recursively) replaces the original mental model of separate diagnostic phases. This question was a placeholder for that decision — the resolution is the architectural commitment in D013.\n",
+            "priority": "medium",
+            "resolved": false,
+            "resolution": ""
+          },
+          {
+            "id": "bpf_fixedpoint_scale_choice",
+            "text": "What fixed-point representation does src/pebay_bpf.h (pending, per D011) use for m1 and m2? Candidates: Q32.32 int64_t m1 + int128-emulated m2; periodic-spill scheme where m2 is flushed to userspace before saturation; rolling-rescale with a shift-factor field; full offload where BPF keeps only m1 plus a raw-sample ring buffer and userspace computes m2.\n",
+            "context": "D011 defers this choice to first-BPF-use per D021 draft-first. The D009 per_cpu_update_bytes budget (64 bytes) constrains the encoding at k=2 and pressures it further at k=4. Whichever encoding ships must pass the pebay_bpf-vs-pebay round-trip property test within a documented tolerance.\n",
+            "priority": "high",
+            "resolved": false,
+            "resolution": ""
+          }
+        ]
+      },
+      "created_at": "2026-04-29T16:59:01.097917+00:00",
+      "label": "builder 2026-04-29T16:59:01Z @6837e31+dirty",
+      "integrity_hash": ""
     }
   ],
   "edges": [
@@ -13078,7 +13906,21 @@
         "rationale": "source=iomoments-ontology.yaml; content_hash=14a2ff46cc0f67b4a5c382ba8b260ec44421531833c9a84495ce82817b93dffe"
       },
       "created_at": "2026-04-29T16:15:08.106040+00:00"
+    },
+    {
+      "parent_id": "054a0300-9ce5-4334-a112-5468e9d64886",
+      "child_id": "6b8c786b-bbec-4f3a-a588-0cc4508b39d1",
+      "decision": {
+        "question": "Rebuild iomoments ontology from iomoments-ontology.yaml?",
+        "options": [
+          "regenerate",
+          "skip"
+        ],
+        "chosen": "regenerate",
+        "rationale": "source=iomoments-ontology.yaml; content_hash=27031bd34f710fb87e963225588e6d290db355aeadc791068ac4373976b160dc"
+      },
+      "created_at": "2026-04-29T16:59:01.097917+00:00"
     }
   ],
-  "current_node_id": "054a0300-9ce5-4334-a112-5468e9d64886"
+  "current_node_id": "6b8c786b-bbec-4f3a-a588-0cc4508b39d1"
 }

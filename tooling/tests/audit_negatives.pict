@@ -1,0 +1,30 @@
+# audit_negatives.pict — combinatorial coverage for the ontology audit's
+# negative-case detection.
+#
+# Authoring surface: this file. Consumer: tooling/tests/test_audit_negatives_pict.py
+# invokes pict at test-collection time with /f:json, parameterizes one
+# test per generated row, materializes a synthetic ontology + working
+# tree according to the row's values, runs the audit, and asserts the
+# row's predicted failure modes are observed.
+#
+# Predicted outcome is computed in the test (a SIMPLER, separate function
+# from the audit's own logic) so passing a PICT row is a real cross-check
+# rather than the audit grading itself.
+#
+# Constraints below remove combinations that aren't semantically possible
+# (a file_only ref has no symbol, so "decoy" / "symbol_missing" can't
+# apply; "double_colon" is pytest convention, only meaningful for .py).
+# Pairwise (default order=2) coverage of the remaining space yields ~30
+# rows; that's enough to cover every two-way interaction across the
+# audit's parameter axes.
+
+status:        spec, tested, implemented, deviation, n_a
+impl_refs:     empty, one_ok, one_file_missing, one_symbol_missing, one_decoy
+verif_refs:    empty, one_ok, one_file_missing, one_symbol_missing, one_decoy
+rationale:     empty, populated
+ref_form:      file_only, colon, double_colon
+file_ext:      py, c
+
+IF [ref_form] = "file_only" THEN [impl_refs] IN {"empty", "one_ok", "one_file_missing"};
+IF [ref_form] = "file_only" THEN [verif_refs] IN {"empty", "one_ok", "one_file_missing"};
+IF [ref_form] = "double_colon" THEN [file_ext] = "py";
