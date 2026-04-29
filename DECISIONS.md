@@ -1412,3 +1412,100 @@ as a real gap, as it should.
 
 **Status.** Designed. Not yet implemented. Implementation lands
 across the seven producer steps in §7, each as its own commit.
+
+### D016: 5.15-floor cloud witness — Ubuntu 20.04 LTS via Canonical's `linux-aws` flavor
+
+**Date.** 2026-04-29.
+
+**Refines.** D001's 5.15 supported-kernel-floor commitment by
+adding an explicit cloud witness path. D001 itself is unchanged.
+
+**Background.** #46 (AWS tracer) revealed that mainstream default
+cloud AMIs no longer expose the 5.15 floor: Canonical's Ubuntu 22.04
+`-aws` AMI ships kernel 6.8 (HWE-rolled forward), and AL2023 ships
+6.18. Without a deliberate witness, "iomoments is supported on
+kernel 5.15" became a bare-metal-and-vmtest-only claim, with no
+real cloud kernel exercising the floor at any point in the test
+matrix. The original D014/D001 supported-range commitment lost
+operational coverage on its lower bound.
+
+**Decision.** The 5.15-floor cloud witness is **Canonical's Ubuntu
+20.04 LTS (focal) default AMI**, owner `099720109477`, name pattern
+`ubuntu/images/hvm-ssd*/ubuntu-focal-20.04-amd64-server-*`. Per the
+2026-04-29 probe, this AMI ships kernel `5.15.0-1084-aws` — exact
+match for our floor.
+
+The witness is wired into `scripts/aws_tracer.sh` as a third entry
+in the `DISTROS` array, alongside ubuntu-22.04 and al2023. Every
+probe run captures uname -r alongside the AMI ID so subsequent runs
+detect kernel rev drift. If/when Canonical rolls focal HWE forward
+past 5.15 (as they did for jammy), the probe surfaces it
+immediately and a follow-on D-entry picks the next 5.15 path
+(likely AL2 + kernel-5.15 swap, or focal pinned via an older AMI
+date).
+
+**Why this option, not the alternatives.** Three alternatives were
+considered when the cloud-floor gap surfaced (#46 findings):
+
+- **(a) Keep 5.15 as a vmtest-only contract.** Rejected — leaves
+  iomoments shipping a "supported on 5.15" claim with no cloud
+  kernel ever loading the program at the floor. Same risk shape
+  as D014 §4 documents for vmtest-fedora38-as-proxy.
+- **(b) Pin a non-default-AMI distro that ships 5.15 in cloud.**
+  ✓ Chosen.
+- **(c) Bump the floor to 6.x.** Rejected — would supersede D001
+  unnecessarily. Ubuntu 20.04 LTS receives standard support
+  through April 2025 and ESM through April 2030; a 5.15-supporting
+  enterprise install base remains substantial.
+
+**Why Ubuntu 20.04 specifically, not Oracle Linux 8 + UEK 7 / AL2 +
+kernel-5.15.** Initial design favored Oracle Linux 8 with UEK 7
+(native 5.15, no install dance) but Oracle's official AMIs are
+marketplace-only — `ec2 describe-images --owners <oracle>` returns
+zero in fresh accounts. AL2 + kernel-5.15 swap requires post-boot
+`amazon-linux-extras install kernel-5.15` followed by reboot —
+multi-step bootstrap that complicates the probe script. Ubuntu
+20.04's default AMI lands cleanly on 5.15 with zero post-boot
+work, same publisher (Canonical) as our existing 22.04 witness,
+public AMI, single-instance launch.
+
+**Probe-run results (2026-04-29):**
+
+| Distro | Kernel | k=4 | k=3 |
+|---|---|---|---|
+| Ubuntu 20.04 (focal) | `5.15.0-1084-aws` | accept | accept |
+| Ubuntu 22.04 (jammy) | `6.8.0-1052-aws` | accept | accept |
+| AL2023 | `6.18.20-20.229.amzn2023.x86_64` | reject (1M-step) | accept |
+
+The 5.15 floor is now exercised in cloud, with k=4 verifier-
+accepting. The supported-range commitment "5.15 through 6.12
+inclusive" (D014 §1) has same-version cloud confirmation on its
+lower bound and bracket / extrapolation confirmation on its upper
+range.
+
+**Operational discipline.**
+
+- The probe is a development-time tool, run from a developer
+  workstation when iomoments-affecting changes land. It is NOT a
+  pre-push gate today (would add ~5 min and ~$0.005 per push for
+  three EC2 launches). #47 (cloud matrix orchestrator) is the
+  natural place for periodic / triggered re-running.
+- If the focal AMI's `-aws` kernel rolls forward past 5.15, the
+  next probe run captures the new uname -r in
+  `build/aws-tracer/ubuntu-20.04/meta.txt`. A diff against this
+  D-entry's recorded `5.15.0-1084-aws` value catches the rollover.
+- AL2 with kernel-5.15 swap remains the documented fallback if
+  Canonical drops focal `-aws` 5.15 entirely.
+
+**Cross-refs:**
+- D001 — original 5.15 supported-floor commitment; D016 refines
+  the cloud-coverage operational story without changing D001's
+  substance.
+- D014 — supported kernel range (5.15 through 6.12 inclusive); the
+  Ubuntu 20.04 witness covers D014's lower bound.
+- `scripts/aws_tracer.sh` — DISTROS array now contains three
+  entries; the focal entry is the witness.
+- `docs/aws-tracer-findings.md` — empirical record updated
+  with the 2026-04-29 three-distro probe results.
+
+**Status.** Active. The witness is shipping with this commit.

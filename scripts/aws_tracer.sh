@@ -29,6 +29,7 @@ AWS="$HOME/iomoments/.venv/bin/aws --profile ${AWS_PROFILE} --region ${AWS_REGIO
 DISTROS=(
   "099720109477|ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*|ubuntu-22.04|ubuntu|sudo apt-get update -y && sudo apt-get install -y linux-tools-\$(uname -r) linux-tools-generic"
   "amazon|al2023-ami-2023.*-x86_64|al2023|ec2-user|sudo dnf install -y bpftool"
+  "099720109477|ubuntu/images/hvm-ssd*/ubuntu-focal-20.04-amd64-server-*|ubuntu-20.04|ubuntu|sudo apt-get update -y && sudo apt-get install -y linux-tools-\$(uname -r) linux-tools-generic"
 )
 
 RUN_ID="$(date +%s)-$$"

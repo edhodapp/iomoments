@@ -1,6 +1,6 @@
 # AWS BPF tracer findings — #46 (faithfulness probe)
 
-**Date:** 2026-04-28
+**Initial probe:** 2026-04-28. **Floor witness added:** 2026-04-29 (D016).
 **Probe script:** `scripts/aws_tracer.sh`
 **Question (D014 #46):** Do AWS-hosted distro kernels produce the same BPF-verifier verdicts that local `vmtest` predicts?
 
@@ -8,12 +8,14 @@
 
 vmtest is faithful within its modeled range. The k=4 → k=3 boundary
 predicted by vmtest reproduces in cloud, with the same root-cause
-rejection signature (verifier 1M-step budget exhaustion). Two side
-findings worth tracking before #47:
+rejection signature (verifier 1M-step budget exhaustion). The 5.15
+floor (D001) is now exercised in cloud via Ubuntu 20.04, which ships
+`5.15.0-1084-aws` by default — both BPF variants verifier-accept.
 
-1. Canonical Ubuntu 22.04 `-aws` AMIs ship kernel **6.8**, not 5.15.
-   We have no AWS data point on iomoments' actual 5.15 floor.
-2. Amazon Linux 2023 ships kernel **6.18** — one minor above the top
+The first probe surfaced one open side finding still worth tracking
+before #47:
+
+1. Amazon Linux 2023 ships kernel **6.18** — one minor above the top
    of our local vmtest matrix (v6.17). The matrix needs to extend.
 
 ## Method
@@ -34,6 +36,7 @@ findings worth tracking before #47:
 
 | AMI source | AMI ID | Kernel | k=4 verdict | k=3 verdict |
 |---|---|---|---|---|
+| Canonical `ubuntu-focal-20.04-amd64-server-*` | `ami-0fb0b230890ccd1e6` | `5.15.0-1084-aws` | accept | accept |
 | Canonical `ubuntu-jammy-22.04-amd64-server-*` | `ami-0ff290337e78c83bf` | `6.8.0-1052-aws` | accept | accept |
 | Amazon `al2023-ami-2023.*-x86_64` | `ami-0c1e21d82fe9c9336` | `6.18.20-20.229.amzn2023.x86_64` | **reject** | accept |
 
@@ -55,24 +58,31 @@ multi-precision k=4 path-explosion bug reproduces on AL2023's 6.18.
 
 | AWS kernel | Closest vmtest | vmtest k=4 | AWS k=4 | vmtest k=3 | AWS k=3 |
 |---|---|---|---|---|---|
+| Ubuntu 20.04 / 5.15 | exact match v5.15 | accept | **accept** ✓ | accept | **accept** ✓ |
 | Ubuntu 22.04 / 6.8 | bracketed by v6.6 (accept) and v6.12 (accept) | accept | **accept** ✓ | accept | **accept** ✓ |
 | AL2023 / 6.18 | above top — extrapolate from v6.17 | reject | **reject** ✓ | accept | **accept** ✓ |
 
 Verdicts match. Rejection signature for AL2023 matches: vmtest v6.17
 fails k=4 on the same 1M-step budget overflow with the same
-multi-precision-arithmetic path-explosion shape.
+multi-precision-arithmetic path-explosion shape. Ubuntu 20.04 is the
+**only exact-version match** in the table — Canonical's `linux-aws`
+flavor on focal still tracks 5.15 (kernel rev `5.15.0-1084-aws`),
+making this row a same-version comparison rather than a cluster
+estimate.
 
 ## Caveats
 
-- Neither AWS kernel is an exact-version match against any vmtest
-  kernel. Ubuntu 22.04's 6.8 is bracketed; AL2023's 6.18 is
-  extrapolated above the matrix top. Both are *closest-cluster*
-  comparisons, not same-version.
+- Two of three AWS kernels (Ubuntu 22.04, AL2023) are not exact-
+  version matches against any vmtest kernel — bracket / extrapolation
+  comparisons. Ubuntu 20.04 (5.15) is the one same-version match.
 - vmtest configures the kernel with the `fedora38` config. Cloud
   vendor kernels carry their own configs and patch sets. Same-cluster
   agreement here suggests config differences are not changing the
   k=4 boundary's location, but a single probe cannot prove that
   generally.
+- Canonical may roll the focal `-aws` HWE kernel forward at any
+  point; today's exact-5.15 witness becomes a 6.x witness if/when
+  that happens. Re-running the probe periodically catches it.
 - We did not capture insn-count for the accepting cases. `bpftool
   prog load` (without `-d`) prints nothing on success. If we want
   insn-count drift detection in #47, the AWS-side loader needs `-d`
@@ -90,12 +100,10 @@ multi-precision-arithmetic path-explosion shape.
    Add v6.18 (and likely v6.19+ as they release) to the local
    matrix so we have an apples-to-apples comparator instead of
    extrapolating.
-2. **vmtest matrix needs a way to test our 5.15 floor under
-   realistic config.** No mainstream cloud AMI default ships 5.15
-   anymore. Options: (a) keep 5.15 as a vmtest-only contract, (b)
-   pin RHEL 8 / Oracle Linux 8 in the cloud matrix (still ships
-   ~5.x kernels), (c) accept that 5.15 is now a bare-metal /
-   on-prem-only floor and document the cloud floor separately.
+2. **5.15-floor cloud coverage is now established.** Resolved by
+   D016 — Canonical Ubuntu 20.04 ships 5.15.0-1084-aws and is the
+   chosen 5.15 witness. The earlier "no AWS data point on the
+   floor" gap is closed.
 3. **The k=4-to-k=3 fallback boundary is the right architecture.**
    It is what made AL2023 a clean degradation rather than an
    outright load failure on this probe. D011/D014's design
