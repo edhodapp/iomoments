@@ -60,21 +60,30 @@ multi-precision k=4 path-explosion bug reproduces on AL2023's 6.18.
 |---|---|---|---|---|---|
 | Ubuntu 20.04 / 5.15 | exact match v5.15 | accept | **accept** ✓ | accept | **accept** ✓ |
 | Ubuntu 22.04 / 6.8 | bracketed by v6.6 (accept) and v6.12 (accept) | accept | **accept** ✓ | accept | **accept** ✓ |
-| AL2023 / 6.18 | above top — extrapolate from v6.17 | reject | **reject** ✓ | accept | **accept** ✓ |
+| AL2023 / 6.18 | exact match v6.18 (added 2026-04-29) | reject | **reject** ✓ | accept | **accept** ✓ |
 
-Verdicts match. Rejection signature for AL2023 matches: vmtest v6.17
-fails k=4 on the same 1M-step budget overflow with the same
-multi-precision-arithmetic path-explosion shape. Ubuntu 20.04 is the
-**only exact-version match** in the table — Canonical's `linux-aws`
-flavor on focal still tracks 5.15 (kernel rev `5.15.0-1084-aws`),
-making this row a same-version comparison rather than a cluster
-estimate.
+Verdicts match across all three rows. The AL2023 row is now an
+**exact-version vmtest comparison** rather than the earlier
+extrapolation from v6.17 — the v6.18 vmtest build (added to
+`~/kernel-images/` 2026-04-29) reproduces the *exact* insn-count
+signature observed in cloud:
+
+```
+processed 1000001 insns (limit 1000000) max_states_per_insn 73
+  total_states 49038 peak_states 3424 mark_read 0
+```
+
+Identical numbers between vmtest v6.18 and AL2023 6.18 cloud (both
+to the unit). Two rows in the table are now exact-version matches
+(Ubuntu 20.04 / v5.15 and AL2023 / v6.18); only Ubuntu 22.04 / 6.8
+remains a bracketed comparison.
 
 ## Caveats
 
-- Two of three AWS kernels (Ubuntu 22.04, AL2023) are not exact-
-  version matches against any vmtest kernel — bracket / extrapolation
-  comparisons. Ubuntu 20.04 (5.15) is the one same-version match.
+- One of three AWS kernels (Ubuntu 22.04 / 6.8) is not an exact-
+  version match against any vmtest kernel — bracketed comparison.
+  Ubuntu 20.04 (5.15) and AL2023 (6.18) are same-version matches as
+  of 2026-04-29.
 - vmtest configures the kernel with the `fedora38` config. Cloud
   vendor kernels carry their own configs and patch sets. Same-cluster
   agreement here suggests config differences are not changing the
@@ -96,10 +105,10 @@ estimate.
 
 ## Implications for #47 (cloud matrix orchestrator)
 
-1. **vmtest matrix needs to extend up.** AL2023 is already on 6.18.
-   Add v6.18 (and likely v6.19+ as they release) to the local
-   matrix so we have an apples-to-apples comparator instead of
-   extrapolating.
+1. **vmtest matrix extended to v6.18 (2026-04-29).** Added to close
+   AL2023's extrapolation gap. Result reproduces AL2023's exact
+   insn-count overflow signature. v6.19+ should be added as those
+   kernels release and become the default in any cloud distro.
 2. **5.15-floor cloud coverage is now established.** Resolved by
    D016 — Canonical Ubuntu 20.04 ships 5.15.0-1084-aws and is the
    chosen 5.15 witness. The earlier "no AWS data point on the
