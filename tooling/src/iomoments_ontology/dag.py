@@ -46,6 +46,10 @@ from iomoments_ontology.models import (
     Decision,
     Ontology,
     OntologyDAG,
+    TestResult,
+    TestResultsDAG,
+    TestResultsDAGNode,
+    TestResultsSnapshot,
 )
 
 
@@ -287,6 +291,230 @@ def snapshot_if_changed(
 
 
 # -- Phase 3: advisory-locked transaction ---------------------------------
+
+
+_DEFAULT_KEEP_LAST_K = 100  # D015 §4: cross-snapshot retention default
+
+
+# -- D015: TestResultsDAG persistence (mirrors OntologyDAG above) ---------
+
+
+def load_test_results_dag(
+    path: str, project_name: str,
+) -> TestResultsDAG:
+    """Load a TestResultsDAG from JSON, or return an empty new DAG.
+
+    File-not-found returns an empty DAG (the bootstrap case);
+    parse failures raise (corrupted DAG must not be silently
+    replaced — the audit reads from this).
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return TestResultsDAG(project_name=project_name)
+    return TestResultsDAG.from_json(text)
+
+
+def save_test_results_dag(dag: TestResultsDAG, path: str) -> None:
+    """Persist a TestResultsDAG via atomic tempfile + rename."""
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent_dir, exist_ok=True)
+    fd = tempfile.NamedTemporaryFile(
+        mode="w", dir=parent_dir, suffix=".tmp",
+        delete=False, encoding="utf-8",
+    )
+    try:
+        fd.write(dag.to_json())
+        fd.close()
+        os.replace(fd.name, path)
+    except BaseException:
+        _cleanup_tempfile(fd, fd.name)
+        raise
+
+
+def test_results_content_hash(snapshot: TestResultsSnapshot) -> str:
+    """SHA-256 hex digest over a TestResultsSnapshot.
+
+    Used by ``snapshot_test_results_if_changed`` to decide whether
+    an append is a no-op. Same canonicalization rules as
+    ``ontology_content_hash``: list order is semantic, datetime
+    fields use ISO-string encoding, no Python repr leakage.
+    """
+    return _canonical_hash(snapshot)
+
+
+def save_test_results_snapshot(
+    dag: TestResultsDAG,
+    snapshot: TestResultsSnapshot,
+    label: str,
+    decision: Decision | None = None,
+) -> str:
+    """Append a new node carrying ``snapshot`` to the DAG.
+
+    Mirrors ``save_snapshot`` for OntologyDAG: links the new node as
+    a child of the current node when one exists; synthesizes a
+    placeholder Decision if the caller doesn't supply one. Returns
+    the new node id.
+
+    Unconditional append — for content-hash-gated append, use
+    ``snapshot_test_results_if_changed``.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    node_id = make_node_id()
+    node = TestResultsDAGNode(
+        id=node_id,
+        snapshot=snapshot.model_copy(deep=True),
+        created_at=now,
+        label=label,
+    )
+    dag.nodes.append(node)
+    if dag.current_node_id:
+        if decision is None:
+            decision = Decision(
+                question="save",
+                options=["continue"],
+                chosen="continue",
+                rationale=label,
+            )
+        edge = DAGEdge(
+            parent_id=dag.current_node_id,
+            child_id=node_id,
+            decision=decision,
+            created_at=now,
+        )
+        dag.edges.append(edge)
+    dag.current_node_id = node_id
+    return node_id
+
+
+def snapshot_test_results_if_changed(
+    dag: TestResultsDAG,
+    snapshot: TestResultsSnapshot,
+    label: str,
+    decision: Decision | None = None,
+) -> tuple[str, bool]:
+    """Append a snapshot only when content differs from the parent.
+
+    Returns ``(node_id, created)``: ``created`` is True when a new
+    node was appended, False when the content hash matched and no
+    append was needed. Empty DAG (bootstrap) always appends.
+    """
+    new_hash = test_results_content_hash(snapshot)
+    current = dag.get_current_node()
+    if current is not None:
+        if test_results_content_hash(current.snapshot) == new_hash:
+            return current.id, False
+    node_id = save_test_results_snapshot(dag, snapshot, label, decision)
+    return node_id, True
+
+
+def prune_and_add_result(
+    snapshot: TestResultsSnapshot,
+    new_result: TestResult,
+) -> TestResultsSnapshot:
+    """Return a new snapshot with ``new_result`` replacing any older
+    record sharing the same (verification_ref, env.natural_key()).
+
+    D015 §4 within-snapshot retention: latest-passing-per-(ref, env).
+    The TestResultsSnapshot validator already rejects duplicates;
+    this helper does the pre-validation pruning so the producer
+    pattern (load → mutate → save) is one line.
+    """
+    new_key = (
+        new_result.verification_ref,
+        new_result.environment.natural_key(),
+    )
+    pruned = [
+        r for r in snapshot.results
+        if (r.verification_ref, r.environment.natural_key()) != new_key
+    ]
+    pruned.append(new_result)
+    return TestResultsSnapshot(results=pruned)
+
+
+def prune_test_results_dag_nodes(
+    dag: TestResultsDAG,
+    keep_last_k: int = _DEFAULT_KEEP_LAST_K,
+) -> int:
+    """Drop ancestor nodes beyond the most recent K, return count pruned.
+
+    D015 §4 across-snapshot retention. The current node is always
+    kept; pruning walks the parent chain from current and keeps the
+    most recent K-1 ancestors. Edges into pruned nodes are dropped
+    too. Audit only reads the current snapshot, so pruning ancient
+    history doesn't affect correctness.
+
+    Disconnected nodes (not in the current node's ancestry) are
+    NOT touched — this function is conservative; it only prunes
+    what's safely on the chain to the current node.
+    """
+    if keep_last_k < 1:
+        raise ValueError(f"keep_last_k must be >= 1, got {keep_last_k}")
+    if not dag.current_node_id:
+        return 0
+
+    parent_lookup: dict[str, str] = {
+        e.child_id: e.parent_id for e in dag.edges
+    }
+    chain: list[str] = []
+    node_id: str | None = dag.current_node_id
+    while node_id is not None:
+        chain.append(node_id)
+        node_id = parent_lookup.get(node_id)
+
+    if len(chain) <= keep_last_k:
+        return 0
+
+    keep_ids = set(chain[:keep_last_k])
+    drop_ids = set(chain[keep_last_k:])
+
+    before_node_count = len(dag.nodes)
+    dag.nodes = [n for n in dag.nodes if n.id not in drop_ids]
+    dag.edges = [
+        e for e in dag.edges
+        if e.parent_id in keep_ids and e.child_id in keep_ids
+    ]
+    return before_node_count - len(dag.nodes)
+
+
+@contextmanager
+def test_results_dag_transaction(
+    path: str,
+    project_name: str,
+) -> Iterator[TestResultsDAG]:
+    """Process-safe load / modify / save transaction for TestResultsDAG.
+
+    Mirrors ``dag_transaction`` for OntologyDAG: advisory fcntl
+    lock, save-elision when state unchanged, rollback on exception.
+    Lock file lives at ``path + ".lock"``; same TOCTOU-avoidance
+    discipline as the ontology transaction.
+
+    Producer usage::
+
+        with test_results_dag_transaction(path, project_name) as dag:
+            current = dag.get_current_node()
+            base = current.snapshot if current else TestResultsSnapshot()
+            updated = prune_and_add_result(base, new_result)
+            snapshot_test_results_if_changed(dag, updated, label)
+        # DAG saved here; lock released.
+    """
+    lock_path = path + ".lock"
+    parent_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(parent_dir, exist_ok=True)
+    with open(lock_path, "a", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            dag = load_test_results_dag(path, project_name)
+            pre_state = dag.model_copy(deep=True)
+            yield dag
+            if dag != pre_state:
+                save_test_results_dag(dag, path)
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+# -- Original OntologyDAG transaction (unchanged) -------------------------
 
 
 @contextmanager
