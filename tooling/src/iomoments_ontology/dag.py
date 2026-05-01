@@ -417,11 +417,35 @@ def prune_and_add_result(
     The TestResultsSnapshot validator already rejects duplicates;
     this helper does the pre-validation pruning so the producer
     pattern (load → mutate → save) is one line.
+
+    **Identity-preserving on re-observation.** If an existing result
+    matches the new one on (ref, env, outcome, captured_git_sha),
+    the existing record is preserved verbatim — including its
+    original ``captured_at``. This is "first observation wins":
+    re-running the same passing test at the same git SHA produces
+    the same observation, not a new event with a fresher timestamp.
+    Without this rule, every re-run of an unchanged test suite would
+    drift the snapshot's content hash via captured_at and append a
+    no-op DAG node every push.
     """
     new_key = (
         new_result.verification_ref,
         new_result.environment.natural_key(),
     )
+    for existing in snapshot.results:
+        existing_key = (
+            existing.verification_ref,
+            existing.environment.natural_key(),
+        )
+        if existing_key != new_key:
+            continue
+        if (
+            existing.outcome == new_result.outcome
+            and existing.captured_git_sha == new_result.captured_git_sha
+        ):
+            # Identical observation — keep the original record.
+            return snapshot
+        break  # different observation, fall through to replace
     pruned = [
         r for r in snapshot.results
         if (r.verification_ref, r.environment.natural_key()) != new_key
