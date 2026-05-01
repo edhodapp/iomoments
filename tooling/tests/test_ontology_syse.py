@@ -15,10 +15,13 @@ import pytest
 from pydantic import ValidationError
 
 from iomoments_ontology import (
+    DiagnosticSignal,
     DomainConstraint,
+    EnvironmentSpec,
     Ontology,
     OntologyDAG,
     PerformanceConstraint,
+    VerdictNode,
     save_snapshot,
     validate_ontology_strict,
 )
@@ -216,3 +219,99 @@ def test_validate_ontology_strict_rejects_bad_performance_constraint() -> None:
     errors = validate_ontology_strict(bad)
     assert errors
     assert any("budget" in e for e in errors)
+
+
+# --- D015 §3: expected_environments default + override ----------------
+
+
+def test_domain_constraint_expected_environments_default_is_host() -> None:
+    """Default per D015 §3: a single 'host' EnvironmentSpec."""
+    cons = DomainConstraint(name="x", description="y")
+    assert len(cons.expected_environments) == 1
+    assert cons.expected_environments[0].kind == "host"
+
+
+def test_perf_constraint_expected_environments_default_is_host() -> None:
+    cons = PerformanceConstraint(
+        name="x", description="y", metric="m",
+        budget=1.0, unit="ns", direction="max",
+    )
+    assert len(cons.expected_environments) == 1
+    assert cons.expected_environments[0].kind == "host"
+
+
+def test_diagnostic_signal_expected_environments_default_is_host() -> None:
+    sig = DiagnosticSignal(name="x", description="y")
+    assert len(sig.expected_environments) == 1
+    assert sig.expected_environments[0].kind == "host"
+
+
+def test_verdict_node_expected_environments_default_is_host() -> None:
+    node = VerdictNode(kind="green", description="y")
+    assert len(node.expected_environments) == 1
+    assert node.expected_environments[0].kind == "host"
+
+
+def test_expected_environments_independent_across_instances() -> None:
+    """The default must not be shared mutable state — two
+    constraints must not share the same list object (a Field
+    default-factory pitfall)."""
+    a = DomainConstraint(name="a", description="d")
+    b = DomainConstraint(name="b", description="d")
+    assert a.expected_environments is not b.expected_environments
+
+
+def test_expected_environments_override_with_vmtest_matrix() -> None:
+    """A claim that needs broader-than-host coverage declares it."""
+    cons = DomainConstraint(
+        name="bpf_loads_across_supported_kernels",
+        description="iomoments BPF program loads on every supported kernel.",
+        expected_environments=[
+            EnvironmentSpec(kind="vmtest", kernel="v5.15"),
+            EnvironmentSpec(kind="vmtest", kernel="v6.1"),
+            EnvironmentSpec(kind="vmtest", kernel="v6.6"),
+            EnvironmentSpec(kind="vmtest", kernel="v6.12"),
+        ],
+    )
+    assert len(cons.expected_environments) == 4
+    kernels = [e.kernel for e in cons.expected_environments]
+    assert kernels == ["v5.15", "v6.1", "v6.6", "v6.12"]
+
+
+def test_expected_environments_round_trips_through_json() -> None:
+    """Serialize → deserialize must preserve the env list verbatim."""
+    original = DomainConstraint(
+        name="x", description="y",
+        expected_environments=[
+            EnvironmentSpec(kind="host"),
+            EnvironmentSpec(
+                kind="aws-ec2", distro="ubuntu-20.04",
+            ),
+        ],
+    )
+    text = original.model_dump_json()
+    restored = DomainConstraint.model_validate_json(text)
+    assert (
+        restored.expected_environments
+        == original.expected_environments
+    )
+
+
+def test_existing_yaml_ontology_loads_with_default_envs() -> None:
+    """Existing YAML constraints predate this field; they must load
+    cleanly with the host default rather than refusing to parse."""
+    legacy = {
+        "domain_constraints": [
+            {
+                "name": "legacy_constraint",
+                "description": "doesn't carry expected_environments",
+                "status": "spec",
+            }
+        ]
+    }
+    errors = validate_ontology_strict(legacy)
+    assert not errors
+    ont = Ontology.model_validate(legacy)
+    cons = ont.domain_constraints[0]
+    assert len(cons.expected_environments) == 1
+    assert cons.expected_environments[0].kind == "host"

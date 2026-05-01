@@ -100,6 +100,9 @@ class DomainConstraint(BaseModel):
     implementation_refs: list[str] = []
     verification_refs: list[str] = []
     status: RequirementStatus = "spec"
+    expected_environments: list["EnvironmentSpec"] = Field(
+        default_factory=lambda: [EnvironmentSpec(kind="host")],
+    )
 
 
 class PerformanceConstraint(BaseModel):
@@ -144,6 +147,9 @@ class PerformanceConstraint(BaseModel):
     implementation_refs: list[str] = []
     verification_refs: list[str] = []
     status: RequirementStatus = "spec"
+    expected_environments: list["EnvironmentSpec"] = Field(
+        default_factory=lambda: [EnvironmentSpec(kind="host")],
+    )
 
 
 # --- Solution domain -----------------------------------------------------
@@ -238,6 +244,9 @@ class DiagnosticSignal(BaseModel):
     implementation_refs: list[str] = []
     verification_refs: list[str] = []
     status: RequirementStatus = "spec"
+    expected_environments: list["EnvironmentSpec"] = Field(
+        default_factory=lambda: [EnvironmentSpec(kind="host")],
+    )
 
 
 class VerdictNode(BaseModel):
@@ -268,6 +277,9 @@ class VerdictNode(BaseModel):
     implementation_refs: list[str] = []
     verification_refs: list[str] = []
     status: RequirementStatus = "spec"
+    expected_environments: list["EnvironmentSpec"] = Field(
+        default_factory=lambda: [EnvironmentSpec(kind="host")],
+    )
 
 
 class MomentRepresentation(BaseModel):
