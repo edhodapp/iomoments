@@ -879,6 +879,75 @@ domain_constraints:
       - "tooling/tests/test_audit_negatives_pict.py::test_pict_yielded_nonempty_case_set"
     status: tested
 
+  - name: bpf_loads_in_supported_cloud_kernels
+    description: >
+      iomoments' k=4 BPF program (D014's primary variant) verifier-
+      loads on the cloud kernels we commit to supporting: Ubuntu
+      20.04's 5.15-aws (D016 floor witness) and Ubuntu 22.04's 6.8
+      HWE. AL2023 is deliberately NOT in expected_environments for
+      k=4 — its 6.18 kernel exhausts the verifier's 1M-step budget
+      (D014 §2 documents the boundary), and the k=3 fallback is
+      what iomoments offers there. The k=3 fallback's broader cloud
+      coverage gets a separate claim below.
+    rationale: >
+      D014 (supported kernel range 5.15–6.12) + D016 (cloud-floor
+      witness) + #46 (AWS faithfulness probe). Without this row,
+      the cloud-side commitment is prose only; with it, every push
+      through the audit gate verifies that recent aws_tracer.sh
+      output covers each declared expected_environment.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "scripts/aws_tracer.sh"
+    expected_environments:
+      - kind: aws-ec2
+        distro: ubuntu-20.04
+        flags:
+          variant: k4
+        fix_recipe: "bash scripts/aws_tracer.sh"
+      - kind: aws-ec2
+        distro: ubuntu-22.04
+        flags:
+          variant: k4
+        fix_recipe: "bash scripts/aws_tracer.sh"
+    status: tested
+
+  - name: bpf_k3_fallback_loads_universally_in_cloud
+    description: >
+      iomoments' k=3 fallback variant (D014 §2's "stricter
+      verifiers" path) verifier-loads on every cloud kernel in our
+      probe set: Ubuntu 20.04 (5.15), Ubuntu 22.04 (6.8), and
+      AL2023 (6.18). The fallback's job is universal-cloud
+      coverage; pinning it here ensures any future regression
+      (k=3 starts being rejected somewhere) gates the push.
+    rationale: >
+      D014 §2 + D016. The k=3 variant exists precisely to handle
+      kernels where k=4 fails verifier complexity; "universally
+      loads" is the property iomoments commits to for k=3.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "scripts/aws_tracer.sh"
+    expected_environments:
+      - kind: aws-ec2
+        distro: ubuntu-20.04
+        flags:
+          variant: k3
+        fix_recipe: "bash scripts/aws_tracer.sh"
+      - kind: aws-ec2
+        distro: ubuntu-22.04
+        flags:
+          variant: k3
+        fix_recipe: "bash scripts/aws_tracer.sh"
+      - kind: aws-ec2
+        distro: al2023
+        flags:
+          variant: k3
+        fix_recipe: "bash scripts/aws_tracer.sh"
+    status: tested
+
 # --- Performance constraints --------------------------------------------
 #
 # All budgets are spec-level targets today — no measured values exist

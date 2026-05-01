@@ -232,3 +232,20 @@ done
 echo "" >&2
 echo "[done] results: ${RESULTS_DIR}/" >&2
 ls -la "${RESULTS_DIR}/" >&2
+
+# D015 §7 producer wiring: emit aws-probe TestResult records to the
+# test-results DAG so the freshness audit (D015 §2) sees fresh data.
+# Producer never gates the probe — it's diagnostic, run before
+# teardown so a probe that crashed before completion still gets
+# whatever results it captured. Skip silently if venv isn't present
+# (probe might be invoked from a non-iomoments shell).
+if [ -x "$HOME/iomoments/.venv/bin/python3" ]; then
+    echo "" >&2
+    echo "[producer] emitting TestResults to test-results DAG" >&2
+    "$HOME/iomoments/.venv/bin/python3" \
+        "$HOME/iomoments/tooling/aws_tracer_producer.py" \
+        --results-dir "${RESULTS_DIR}" \
+        --dag "$HOME/iomoments/tooling/iomoments-test-results.json" \
+        --repo-root "$HOME/iomoments" \
+        || echo "[producer] WARNING: producer exited non-zero (advisory)" >&2
+fi
