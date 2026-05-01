@@ -96,7 +96,7 @@ def _seed_matrix(
 # --- _kernel_label -----------------------------------------------------
 
 
-def test_version_key_orders_versions_correctly() -> None:
+def test_bpftool_version_key_orders_versions_correctly() -> None:
     """5.15 must sort AFTER 5.4 (the bug plain sorted() would have)."""
     paths = [
         Path("/usr/lib/linux-tools/5.4.0-100/bpftool"),
@@ -104,7 +104,7 @@ def test_version_key_orders_versions_correctly() -> None:
         Path("/usr/lib/linux-tools/6.1.0/bpftool"),
         Path("/usr/lib/linux-tools/5.15.0-130/bpftool"),
     ]
-    sorted_paths = sorted(paths, key=_PRODUCER._version_key)
+    sorted_paths = sorted(paths, key=_PRODUCER._bpftool_version_key)
     versions = [p.parent.name for p in sorted_paths]
     assert versions == [
         "5.4.0-100",
@@ -112,6 +112,35 @@ def test_version_key_orders_versions_correctly() -> None:
         "5.15.0-130",
         "6.1.0",
     ]
+
+
+def test_kernel_version_key_orders_kernel_images() -> None:
+    """vmlinuz-v5.15 must sort AFTER vmlinuz-v5.4 — same lex bug."""
+    paths = [
+        Path("/k/vmlinuz-v5.15"),
+        Path("/k/vmlinuz-v5.4"),
+        Path("/k/vmlinuz-v6.18"),
+        Path("/k/vmlinuz-v5.6"),
+    ]
+    sorted_paths = sorted(paths, key=_PRODUCER._kernel_version_key)
+    names = [p.name for p in sorted_paths]
+    assert names == [
+        "vmlinuz-v5.4",
+        "vmlinuz-v5.6",
+        "vmlinuz-v5.15",
+        "vmlinuz-v6.18",
+    ]
+
+
+def test_version_key_str_handles_v_prefix_and_suffix() -> None:
+    """Both ``v5.15`` and ``5.15.0-rc1`` reduce sensibly."""
+    assert _PRODUCER._version_key_str("v5.15") == (5, 15)
+    assert _PRODUCER._version_key_str("5.15.0-rc1") == (5, 15, 0)
+    assert _PRODUCER._version_key_str("5.4") == (5, 4)
+    # Verify the bug-preventing comparison.
+    five_4 = _PRODUCER._version_key_str("5.4")
+    five_15 = _PRODUCER._version_key_str("5.15")
+    assert five_4 < five_15
 
 
 def test_kernel_label_strips_vmlinuz_prefix() -> None:

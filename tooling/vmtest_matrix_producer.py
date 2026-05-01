@@ -61,18 +61,20 @@ _VARIANTS = (
 )
 
 
-def _version_key(path: Path) -> tuple[int, ...]:
-    """Sort key for ``/usr/lib/linux-tools/<version>/bpftool`` paths.
+def _version_key_str(version_str: str) -> tuple[int, ...]:
+    """Sort key for a version-bearing string (e.g., ``5.15.0-130``,
+    ``v5.15``).
 
-    Splits the version directory name on dots/dashes and converts
-    the leading numeric components into a tuple of ints, so
-    ``5.4.0`` sorts BEFORE ``5.15.0`` (which lexicographic sort
-    gets backwards). Non-numeric segments stop the conversion;
-    ``5.15.0-rc1`` reduces to ``(5, 15, 0)`` for comparison.
+    Strips a leading ``v`` if present, splits the rest on dots/dashes,
+    converts the leading numeric components into a tuple of ints, and
+    stops at the first non-numeric chunk. ``5.4.0`` sorts BEFORE
+    ``5.15.0`` (lexicographic sort gets this backwards because "4" >
+    "1" character-wise). ``5.15.0-rc1`` reduces to ``(5, 15, 0)``.
     """
-    name = path.parent.name
+    if version_str.startswith("v"):
+        version_str = version_str[1:]
     parts: list[int] = []
-    for chunk in name.replace("-", ".").split("."):
+    for chunk in version_str.replace("-", ".").split("."):
         try:
             parts.append(int(chunk))
         except ValueError:
@@ -80,16 +82,31 @@ def _version_key(path: Path) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _bpftool_version_key(path: Path) -> tuple[int, ...]:
+    """Version key for ``/usr/lib/linux-tools/<ver>/bpftool`` paths."""
+    return _version_key_str(path.parent.name)
+
+
+def _kernel_version_key(path: Path) -> tuple[int, ...]:
+    """Version key for ``vmlinuz-v<ver>`` kernel images."""
+    name = path.name
+    if name.startswith("vmlinuz-"):
+        name = name[len("vmlinuz-"):]
+    return _version_key_str(name)
+
+
 def _find_bpftool() -> str | None:
     """Mirror the Makefile's ``ls ... | sort -V | tail -1`` resolution.
 
     ``sort -V`` is version-aware; plain ``sorted()`` is lexicographic
     and would pick ``5.4.0/bpftool`` over ``5.15.0/bpftool`` on a
-    multi-kernel host. _version_key reproduces sort -V's intent.
+    multi-kernel host. _bpftool_version_key reproduces sort -V's intent.
     """
     base = Path("/usr/lib/linux-tools")
     if base.is_dir():
-        candidates = sorted(base.glob("*/bpftool"), key=_version_key)
+        candidates = sorted(
+            base.glob("*/bpftool"), key=_bpftool_version_key,
+        )
         if candidates:
             return str(candidates[-1])
     return shutil.which("bpftool")
@@ -182,7 +199,9 @@ def _build_results(
     results: list[TestResult] = []
     verdicts: dict[tuple[str, str], int] = {}
 
-    kernels = sorted(kernels_dir.glob("vmlinuz-v*"))
+    kernels = sorted(
+        kernels_dir.glob("vmlinuz-v*"), key=_kernel_version_key,
+    )
     for kernel in kernels:
         label = _kernel_label(kernel)
         for variant_name, obj_basename in _VARIANTS:
@@ -249,7 +268,9 @@ def _purge_stale_for_failed_envs(
 
 def _print_matrix(verdicts: dict[tuple[str, str], int]) -> None:
     """Render the (kernel, variant) → verdict grid to stdout."""
-    kernels = sorted({k for (k, _) in verdicts})
+    kernels = sorted(
+        {k for (k, _) in verdicts}, key=_version_key_str,
+    )
     variants = sorted({v for (_, v) in verdicts})
     print("\n=== vmtest BPF-load matrix ===")
     header = "kernel".ljust(10) + "  ".join(v.ljust(8) for v in variants)
