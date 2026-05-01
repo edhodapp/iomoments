@@ -393,7 +393,7 @@ bpf-test-vm: $(BPF_OBJS)
 # against the BPF objects. Catches kernel-version sensitivity at the
 # verifier-load layer — iomoments' floor (5.15 per D001) and recent
 # LTS lines must all accept the program.
-bpf-test-vm-matrix: $(BPF_OBJS)
+bpf-test-vm-matrix: $(BPF_OBJS) $(BPF_K3_OBJS) $(VENV_STAMP)
 	@if [ -z "$(BPF_OBJS)" ]; then \
 		echo "(no BPF sources; bpf-test-vm-matrix is a no-op today.)"; \
 	elif [ -z "$(KERNEL_MATRIX)" ]; then \
@@ -402,11 +402,7 @@ bpf-test-vm-matrix: $(BPF_OBJS)
 		echo "  then: cp ~/vmtest-build/bzImage-v<ver>-default ~/kernel-images/vmlinuz-v<ver>" >&2; \
 		exit 1; \
 	else \
-		for k in $(KERNEL_MATRIX); do \
-			echo ""; \
-			echo "=== kernel: $$k ==="; \
-			$(MAKE) bpf-test-vm KERNEL_IMAGE=$$k || exit 1; \
-		done; \
+		$(VENV)/bin/python3 tooling/vmtest_matrix_producer.py; \
 	fi
 
 # ---------------------------------------------------------------------------
