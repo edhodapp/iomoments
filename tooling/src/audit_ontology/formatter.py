@@ -8,6 +8,7 @@ machine-readable diff artifact.
 from __future__ import annotations
 
 from audit_ontology.audit import AuditReport, ConstraintReport
+from audit_ontology.freshness import FreshnessIssue, FreshnessMode
 from audit_ontology.resolver import Resolution, ResolvedRef
 
 
@@ -47,6 +48,33 @@ def _render_row(row: ConstraintReport) -> list[str]:
     return lines
 
 
+_MODE_HEADLINE = {
+    FreshnessMode.RUNNER_FORGOT: "runner forgot to fire a test",
+    FreshnessMode.STALE_RESULT: "stale result, code edited since last pass",
+    FreshnessMode.ENV_NEVER_EXERCISED: "environment never exercised",
+}
+
+
+def _render_freshness_issue(issue: FreshnessIssue) -> list[str]:
+    """Render a single freshness gap per D015 §5's three failure modes."""
+    headline = _MODE_HEADLINE[issue.mode]
+    env = issue.environment
+    env_desc = f"kind={env.kind!r}"
+    if env.kernel:
+        env_desc += f" kernel={env.kernel!r}"
+    if env.distro:
+        env_desc += f" distro={env.distro!r}"
+    lines = [
+        f"×  {issue.claim_kind}.{issue.claim_name} — {headline}",
+        f"   verification_ref: {issue.verification_ref}",
+        f"   environment:      ({env_desc})",
+        f"   reason:           {issue.reason}",
+    ]
+    if issue.fix_recipe:
+        lines.append(f"   fix:              {issue.fix_recipe}")
+    return lines
+
+
 def format_text(report: AuditReport) -> str:
     """Return the full audit report as a single printable string."""
     if not report.rows:
@@ -62,6 +90,14 @@ def format_text(report: AuditReport) -> str:
         out.extend(_render_row(row))
         out.append("")
 
+    if report.freshness_issues:
+        out.append("-" * 80)
+        out.append("freshness gaps (D015)")
+        out.append("-" * 80)
+        for issue in report.freshness_issues:
+            out.extend(_render_freshness_issue(issue))
+            out.append("")
+
     summary = report.summary
     out.append("-" * 80)
     out.append("summary")
@@ -74,5 +110,6 @@ def format_text(report: AuditReport) -> str:
     out.append(
         f"  consistency violations: {summary.consistency_violations}",
     )
+    out.append(f"  freshness gaps        : {summary.freshness_gaps}")
     out.append("")
     return "\n".join(out)

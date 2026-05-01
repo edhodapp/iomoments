@@ -25,6 +25,9 @@ from audit_ontology.formatter import format_text
 # parents[0]=audit_ontology, [1]=src, [2]=tooling, [3]=<repo-root>.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_DAG = _REPO_ROOT / "tooling" / "iomoments-ontology.json"
+_DEFAULT_TEST_RESULTS_DAG = (
+    _REPO_ROOT / "tooling" / "iomoments-test-results.json"
+)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -47,8 +50,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--exit-nonzero-on-gap",
         action="store_true",
         help=(
-            "Exit non-zero if any gap (missing ref or consistency "
-            "violation) is found. Default exits 0 regardless."
+            "Exit non-zero if any gap (missing ref, consistency "
+            "violation, or freshness gap if --enforce-freshness) is "
+            "found. Default exits 0 regardless."
+        ),
+    )
+    parser.add_argument(
+        "--enforce-freshness",
+        action="store_true",
+        help=(
+            "Enable D015 freshness checking. Default off — only "
+            "ref-resolution and consistency are checked. Once "
+            "producers are wired (D015 §7), pre-push enables this."
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help=(
+            "D015 §8 escape valve: when --enforce-freshness is set, "
+            "downgrade missing-result and never-exercised gaps to "
+            "warnings. Used during the producer-wiring window. Stale "
+            "results (real freshness regressions) still gate."
+        ),
+    )
+    parser.add_argument(
+        "--test-results-dag",
+        type=Path,
+        default=_DEFAULT_TEST_RESULTS_DAG,
+        help=(
+            "Test-results DAG JSON path (default: "
+            f"{_DEFAULT_TEST_RESULTS_DAG}). Only consulted when "
+            "--enforce-freshness is set."
         ),
     )
     return parser.parse_args(argv)
@@ -74,7 +107,16 @@ def main(argv: list[str] | None = None) -> int:
     argv_list = sys.argv[1:] if argv is None else list(argv)
     args = _parse_args(argv_list)
     try:
-        report = run_audit(args.dag, args.repo_root)
+        report = run_audit(
+            args.dag, args.repo_root,
+            test_results_dag_path=(
+                args.test_results_dag
+                if args.enforce_freshness
+                else None
+            ),
+            enforce_freshness=args.enforce_freshness,
+            bootstrap=args.bootstrap,
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"audit-ontology: tooling error: {exc}", file=sys.stderr)
         return 2
