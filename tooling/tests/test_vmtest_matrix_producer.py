@@ -96,6 +96,24 @@ def _seed_matrix(
 # --- _kernel_label -----------------------------------------------------
 
 
+def test_version_key_orders_versions_correctly() -> None:
+    """5.15 must sort AFTER 5.4 (the bug plain sorted() would have)."""
+    paths = [
+        Path("/usr/lib/linux-tools/5.4.0-100/bpftool"),
+        Path("/usr/lib/linux-tools/5.15.0-50/bpftool"),
+        Path("/usr/lib/linux-tools/6.1.0/bpftool"),
+        Path("/usr/lib/linux-tools/5.15.0-130/bpftool"),
+    ]
+    sorted_paths = sorted(paths, key=_PRODUCER._version_key)
+    versions = [p.parent.name for p in sorted_paths]
+    assert versions == [
+        "5.4.0-100",
+        "5.15.0-50",
+        "5.15.0-130",
+        "6.1.0",
+    ]
+
+
 def test_kernel_label_strips_vmlinuz_prefix() -> None:
     assert _PRODUCER._kernel_label(Path("/foo/vmlinuz-v6.18")) == "v6.18"
 

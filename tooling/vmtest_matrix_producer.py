@@ -61,11 +61,35 @@ _VARIANTS = (
 )
 
 
+def _version_key(path: Path) -> tuple[int, ...]:
+    """Sort key for ``/usr/lib/linux-tools/<version>/bpftool`` paths.
+
+    Splits the version directory name on dots/dashes and converts
+    the leading numeric components into a tuple of ints, so
+    ``5.4.0`` sorts BEFORE ``5.15.0`` (which lexicographic sort
+    gets backwards). Non-numeric segments stop the conversion;
+    ``5.15.0-rc1`` reduces to ``(5, 15, 0)`` for comparison.
+    """
+    name = path.parent.name
+    parts: list[int] = []
+    for chunk in name.replace("-", ".").split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            break
+    return tuple(parts)
+
+
 def _find_bpftool() -> str | None:
-    """Mirror the Makefile's bpftool resolution."""
+    """Mirror the Makefile's ``ls ... | sort -V | tail -1`` resolution.
+
+    ``sort -V`` is version-aware; plain ``sorted()`` is lexicographic
+    and would pick ``5.4.0/bpftool`` over ``5.15.0/bpftool`` on a
+    multi-kernel host. _version_key reproduces sort -V's intent.
+    """
     base = Path("/usr/lib/linux-tools")
     if base.is_dir():
-        candidates = sorted(base.glob("*/bpftool"))
+        candidates = sorted(base.glob("*/bpftool"), key=_version_key)
         if candidates:
             return str(candidates[-1])
     return shutil.which("bpftool")
