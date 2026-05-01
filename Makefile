@@ -446,16 +446,24 @@ bpf-overhead-vm: $(BPF_OBJS) $(BPF_K3_OBJS)
 	fi
 
 # ---------------------------------------------------------------------------
-# Ontology gate (D010). build-ontology is idempotent — no-op if the YAML
-# content hash matches the DAG's current node. gate-ontology rebuilds
+# Ontology gate (D010 + D015). build-ontology is idempotent — no-op if the
+# YAML content hash matches the DAG's current node. gate-ontology rebuilds
 # first so the audit always reads an up-to-date DAG (catches "edited the
 # YAML, forgot to rebuild" drift), then audits with --exit-nonzero-on-gap.
+#
+# --enforce-freshness enables D015 §2 freshness checking against the
+# test-results DAG. --bootstrap is D015 §8's escape valve during the
+# producer-wiring window: ENV_NEVER_EXERCISED and RUNNER_FORGOT downgrade
+# to warnings (visibility, not gating), while STALE_RESULT and
+# UNTRACKED_FILE continue to gate. Removed from the Make target once all
+# producers in D015 §7 are wired.
 # ---------------------------------------------------------------------------
 build-ontology: $(VENV_STAMP)
 	$(VENV)/bin/build-iomoments-ontology
 
 gate-ontology: build-ontology
-	$(VENV)/bin/audit-ontology --exit-nonzero-on-gap
+	$(VENV)/bin/audit-ontology --exit-nonzero-on-gap \
+		--enforce-freshness --bootstrap
 
 # ---------------------------------------------------------------------------
 # Meta.
