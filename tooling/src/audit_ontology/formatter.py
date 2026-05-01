@@ -52,6 +52,7 @@ _MODE_HEADLINE = {
     FreshnessMode.RUNNER_FORGOT: "runner forgot to fire a test",
     FreshnessMode.STALE_RESULT: "stale result, code edited since last pass",
     FreshnessMode.ENV_NEVER_EXERCISED: "environment never exercised",
+    FreshnessMode.UNTRACKED_FILE: "claim references untracked files",
 }
 
 

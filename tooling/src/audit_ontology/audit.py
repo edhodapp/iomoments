@@ -219,14 +219,25 @@ def _run_freshness_pass(
                 kind, entry, snapshot, repo_root,
             )
             if bootstrap:
-                # Bootstrap mode: missing-result and never-exercised
-                # downgrade to warnings (recorded but not counted as
-                # gaps). STALE_RESULT still counts because that's a
-                # genuine freshness regression — the producer fired
-                # at one SHA, then code moved past it.
+                # Bootstrap mode: ENV_NEVER_EXERCISED and
+                # RUNNER_FORGOT downgrade to warnings (no producer
+                # wired yet OR producer didn't fire for this env —
+                # both expected during the wiring window).
+                #
+                # STALE_RESULT continues to gate: a producer fired
+                # then code moved past it, a genuine freshness
+                # regression unrelated to wiring state.
+                #
+                # UNTRACKED_FILE continues to gate: it's an upstream
+                # "the audit literally cannot apply the rule" not a
+                # missing-producer state. Bootstrap mustn't paper
+                # over it; the user has to git-add the file.
+                gating_modes = {
+                    FreshnessMode.STALE_RESULT,
+                    FreshnessMode.UNTRACKED_FILE,
+                }
                 gap_issues = [
-                    i for i in issues
-                    if i.mode is FreshnessMode.STALE_RESULT
+                    i for i in issues if i.mode in gating_modes
                 ]
             else:
                 gap_issues = issues

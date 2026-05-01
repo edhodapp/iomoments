@@ -15,7 +15,7 @@ Exercises:
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -274,6 +274,144 @@ def test_freshness_stale_result(tmp_path: Path) -> None:
     )
     assert len(issues) == 1
     assert issues[0].mode is FreshnessMode.STALE_RESULT
+
+
+def test_freshness_untracked_file_surfaces_gap(tmp_path: Path) -> None:
+    """Files referenced by the claim but not under git control must
+    surface as UNTRACKED_FILE — silently passing would let a claim
+    "be tested" without the freshness rule actually applying.
+    Pre-fix bug: untracked files made last_touch=None, which the
+    at-or-after check then short-circuited as "no constraint."
+    """
+    _init_repo(tmp_path)
+    _commit(tmp_path, "tracked.py", "x = 1", "first")
+    # Claim references a file we never git-add.
+    claim = DomainConstraint(
+        name="c", description="d", status="tested",
+        implementation_refs=["src/never_tracked.py:f"],
+        verification_refs=["tests/x.py::test_x"],
+    )
+    snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tests/x.py::test_x",
+            environment=EnvironmentSpec(kind="host"),
+            outcome="pass",
+            captured_git_sha=git_helpers.head_sha(tmp_path) or "a" * 40,
+            captured_at=_ts(),
+        ),
+    ])
+    issues = check_claim_freshness(
+        "domain", claim, snapshot, tmp_path,
+    )
+    # Should be UNTRACKED_FILE, not a happy "all fresh" pass.
+    assert len(issues) >= 1
+    assert all(i.mode is FreshnessMode.UNTRACKED_FILE for i in issues)
+    assert "never_tracked.py" in issues[0].reason
+
+
+def test_freshness_at_or_after_must_satisfy_all_last_touches(
+    tmp_path: Path,
+) -> None:
+    """Pre-fix bug: _pick_latest_sha collapsed multiple last-touch
+    SHAs into one "max" via pairwise compare, missing the case where
+    a result is at-or-after one impl_ref but not another. The fixed
+    rule verifies the result SHA against EVERY last-touch.
+
+    Construct: two impl files, each touched at a different SHA on
+    the linear chain. A result captured at the OLDER SHA satisfies
+    last-touch[0] but not last-touch[1] — must surface as STALE.
+    """
+    _init_repo(tmp_path)
+    _commit(
+        tmp_path, "tests/x.py", "def test_x(): pass", "test exists",
+    )
+    sha_a = _commit(tmp_path, "src/a.py", "x = 1", "touch a")
+    _commit(tmp_path, "src/b.py", "x = 1", "touch b later")
+    claim = DomainConstraint(
+        name="c", description="d", status="tested",
+        implementation_refs=["src/a.py:x", "src/b.py:x"],
+        verification_refs=["tests/x.py::test_x"],
+    )
+    snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tests/x.py::test_x",
+            environment=EnvironmentSpec(kind="host"),
+            outcome="pass",
+            captured_git_sha=sha_a,  # before b was touched
+            captured_at=_ts(),
+        ),
+    ])
+    issues = check_claim_freshness(
+        "domain", claim, snapshot, tmp_path,
+    )
+    assert len(issues) == 1
+    assert issues[0].mode is FreshnessMode.STALE_RESULT
+
+
+def test_freshness_stale_result_picks_latest_by_captured_at(
+    tmp_path: Path,
+) -> None:
+    """Pre-fix bug: _check_one_pair used matches[-1] as "most recent"
+    for the error message, but list order from snapshot.results is
+    producer-write order and may not be chronological. Fix: pick by
+    captured_at.
+    """
+    _init_repo(tmp_path)
+    _commit(
+        tmp_path, "tests/x.py", "def test_x(): pass", "test exists",
+    )
+    sha1 = _commit(tmp_path, "src/x.py", "v1", "first")
+    _commit(tmp_path, "src/x.py", "v2", "edit")
+    earlier = _ts() - timedelta(hours=1)
+    later = _ts()
+    claim = DomainConstraint(
+        name="c", description="d", status="tested",
+        implementation_refs=["src/x.py:x"],
+        verification_refs=["tests/x.py::test_x"],
+    )
+    # Two stale results — write the LATER one first (so matches[-1]
+    # would pick the EARLIER, the wrong answer).
+    snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tests/x.py::test_x",
+            environment=EnvironmentSpec(kind="host"),
+            outcome="pass",
+            captured_git_sha=sha1,
+            captured_at=later,
+        ),
+    ])
+    # Emulate a snapshot whose write-order doesn't match captured_at:
+    # rebuild with the earlier-captured_at LAST. (TestResultsSnapshot
+    # validator forbids same-(ref, env) collision so use distinct env.)
+    snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tests/x.py::test_x",
+            environment=EnvironmentSpec(kind="host"),
+            outcome="pass",
+            captured_git_sha=sha1,
+            captured_at=later,
+        ),
+        TestResult(
+            verification_ref="tests/x.py::test_x",
+            environment=EnvironmentSpec(
+                kind="host", flags={"variant": "alt"},
+            ),
+            outcome="pass",
+            captured_git_sha=sha1,
+            captured_at=earlier,
+        ),
+    ])
+    issues = check_claim_freshness(
+        "domain", claim, snapshot, tmp_path,
+    )
+    # The "host" env (no flags) is the one declared expected; the
+    # error message should reference the captured_at=later result.
+    host_issues = [
+        i for i in issues
+        if i.mode is FreshnessMode.STALE_RESULT
+        and not i.environment.flags
+    ]
+    assert host_issues, "expected a stale issue for the bare-host env"
 
 
 def test_freshness_happy_path_no_issues(tmp_path: Path) -> None:

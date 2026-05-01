@@ -13,23 +13,28 @@ Implements the mathematical rule from D015 §2:
                                     f ∈ files(impl_refs(c) ∪
                                               verification_refs(c)) }
 
-A failure is reported as one of three modes per D015 §5:
+A failure is reported as one of four modes per D015 §5:
 
-* ``RUNNER_FORGOT``: a TestResult exists for (T, E) but its
-  ``captured_git_sha`` precedes the impl's last_touch — code edited,
-  test never re-ran.
-* ``STALE_RESULT``: a TestResult exists at the right SHA but with
-  a different ``environment`` than required, OR no TestResult
-  exists for (T, E) at all yet the producer should have emitted one.
-* ``ENV_NEVER_EXERCISED``: no TestResult exists for (T, E) at any
-  SHA, suggesting the producer for E hasn't been wired up yet.
+* ``STALE_RESULT``: a TestResult exists for (T, E) but its
+  ``captured_git_sha`` is older than the impl's last_touch — code
+  edited, test never re-ran in the relevant environment.
+* ``RUNNER_FORGOT``: no TestResult exists for (T, E), but a
+  TestResult exists for T in some other env. The producer fires
+  for this ref but didn't fire for the required env.
+* ``ENV_NEVER_EXERCISED``: no TestResult exists for T in any env.
+  No producer has ever emitted for this ref.
+* ``UNTRACKED_FILE``: the claim references a file not under git
+  control, so no last_touch SHA can be computed and the freshness
+  rule cannot be applied. Surfaces because "no answer" must not
+  silently pass — D015 demands the audit refuse to lie about
+  itself, and we cannot verify a TestResult is fresher than a
+  file we can't pin a SHA to.
 
-The "RUNNER_FORGOT" vs "ENV_NEVER_EXERCISED" distinction is what
-guides the user toward the right fix: did they need to re-run an
-existing test (forgot), or wire up a producer for an environment
-they've never tested in (never_exercised)? The distinction is
-made by checking whether ANY past TestResult exists for (T, E):
-yes → forgot/stale; no → never_exercised.
+Distinguishing STALE_RESULT (old SHA) from RUNNER_FORGOT (no
+result for this env) from ENV_NEVER_EXERCISED (no result anywhere)
+guides the right fix: re-run the existing test, wire the producer
+to fire for this env, or wire a producer for the ref at all.
+UNTRACKED_FILE points at a different fix: track the file in git.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ class FreshnessMode(str, Enum):
     RUNNER_FORGOT = "runner_forgot"
     STALE_RESULT = "stale_result"
     ENV_NEVER_EXERCISED = "env_never_exercised"
+    UNTRACKED_FILE = "untracked_file"
 
 
 @dataclass(frozen=True)
@@ -127,47 +133,24 @@ def _claim_files(claim: Any) -> list[str]:
 
 def _resolve_last_touches(
     repo_root: Path, files: list[str],
-) -> list[str]:
-    """Return last-touch SHA for each file that resolves; skip the rest."""
-    out: list[str] = []
+) -> tuple[list[str], list[str]]:
+    """Return (resolved_shas, unresolved_files) for the named files.
+
+    Resolved: last-touch SHA known. Unresolved: file isn't under git
+    control (no commit ever touched it) or git is unavailable. The
+    distinction matters — empty files list means "no constraint"
+    while non-empty unresolved means "we cannot answer, surface as
+    a gap."
+    """
+    resolved: list[str] = []
+    unresolved: list[str] = []
     for f in files:
         sha = git_helpers.last_touch_file(repo_root, f)
         if sha:
-            out.append(sha)
-    return out
-
-
-def _pick_latest_sha(repo_root: Path, shas: list[str]) -> str:
-    """Return the most-recent SHA via pairwise at-or-after comparison.
-
-    n is small (~handful of refs per claim) so the O(n²) loop is
-    fine and avoids needing a topological sort over commits.
-    """
-    latest = shas[0]
-    for sha in shas[1:]:
-        if git_helpers.is_at_or_after(repo_root, sha, latest):
-            latest = sha
-    return latest
-
-
-def _max_last_touch_sha(
-    repo_root: Path, files: list[str],
-) -> str | None:
-    """Latest commit-SHA touching any of the named files.
-
-    Returns None if files is empty (no constraint) or if no file's
-    last-touch can be resolved (git unavailable or all files
-    untracked). The freshness checker treats a None last-touch as
-    "no constraint" — any captured_git_sha is fresh.
-    """
-    if not files:
-        return None
-    last_touches = _resolve_last_touches(repo_root, files)
-    if not last_touches:
-        return None
-    if len(last_touches) == 1:
-        return last_touches[0]
-    return _pick_latest_sha(repo_root, last_touches)
+            resolved.append(sha)
+        else:
+            unresolved.append(f)
+    return resolved, unresolved
 
 
 def _classify_no_match(
@@ -229,18 +212,72 @@ def check_claim_freshness(
     """Apply the freshness rule to one claim, return any gaps."""
     if claim.status != "tested":
         return []
-    issues: list[FreshnessIssue] = []
     files = _claim_files(claim)
-    last_touch = _max_last_touch_sha(repo_root, files)
+    last_touches, unresolved = _resolve_last_touches(repo_root, files)
     claim_name = _claim_label(claim)
 
+    if unresolved:
+        return _untracked_file_issues(
+            claim_kind, claim_name, claim, unresolved,
+        )
+
+    issues: list[FreshnessIssue] = []
     for ref_str in claim.verification_refs:
         for env in claim.expected_environments:
             issues.extend(_check_one_pair(
                 claim_kind, claim_name, ref_str, env,
-                snapshot, repo_root, last_touch,
+                snapshot, repo_root, last_touches,
             ))
     return issues
+
+
+def _untracked_file_issues(
+    claim_kind: str,
+    claim_name: str,
+    claim: Any,
+    unresolved: list[str],
+) -> list[FreshnessIssue]:
+    """One UNTRACKED_FILE issue per (verification_ref, env) pair.
+
+    Reported per-pair (rather than once per claim) so the formatter's
+    existing per-issue rendering Just Works. The reason text names
+    the unresolved files so the user knows which to git-add.
+    """
+    issues: list[FreshnessIssue] = []
+    files_str = ", ".join(unresolved)
+    reason = (
+        f"claim references files not under git control: {files_str}; "
+        f"freshness rule cannot be applied"
+    )
+    for ref_str in claim.verification_refs:
+        for env in claim.expected_environments:
+            issues.append(_build_issue(
+                claim_kind, claim_name, ref_str, env,
+                FreshnessMode.UNTRACKED_FILE, reason,
+            ))
+    return issues
+
+
+def _is_fresh_result(
+    repo_root: Path,
+    result_sha: str,
+    last_touches: list[str],
+) -> bool:
+    """True iff result_sha satisfies the freshness rule for ALL last-touches.
+
+    Per D015 §2's ``≽`` over ``max{last_touch(f) : f ∈ files}``: the
+    set semantics demand the result SHA be at-or-after EVERY
+    last-touch (not just one of them). On linear histories this
+    reduces to "at-or-after the most recent last-touch"; on
+    non-linear histories with merges, the per-file last_touches may
+    be incomparable, so the ALL form is the correct one.
+    """
+    if not git_helpers.is_ancestor_of_head(repo_root, result_sha):
+        return False
+    for lt in last_touches:
+        if not git_helpers.is_at_or_after(repo_root, result_sha, lt):
+            return False
+    return True
 
 
 def _check_one_pair(
@@ -250,7 +287,7 @@ def _check_one_pair(
     env: EnvironmentSpec,
     snapshot: TestResultsSnapshot,
     repo_root: Path,
-    last_touch: str | None,
+    last_touches: list[str],
 ) -> list[FreshnessIssue]:
     """Check freshness for a single (verification_ref, env) pair."""
     matches = _matching_results(snapshot, ref_str, env)
@@ -264,29 +301,27 @@ def _check_one_pair(
             claim_kind, claim_name, ref_str, env, mode, reason,
         )]
 
-    # At least one result matches. Pick the most recent in HEAD's
-    # ancestry that is at-or-after last_touch.
     fresh = [
         r for r in matches
-        if git_helpers.is_ancestor_of_head(
-            repo_root, r.captured_git_sha,
-        )
-        and (
-            last_touch is None
-            or git_helpers.is_at_or_after(
-                repo_root, r.captured_git_sha, last_touch,
-            )
-        )
+        if _is_fresh_result(repo_root, r.captured_git_sha, last_touches)
     ]
     if fresh:
         return []
-    # Have a result but it's stale.
-    most_recent = matches[-1]
+
+    # Have a result but it's stale. Pick the most-recent by
+    # captured_at for the error message — matches list order from
+    # snapshot.results is producer-write order and may not be
+    # chronological under future producers.
+    most_recent = max(matches, key=lambda r: r.captured_at)
+    last_touch_repr = (
+        ", ".join(lt[:12] for lt in last_touches)
+        if last_touches else "unknown"
+    )
     reason = (
         f"latest TestResult for verification_ref={ref_str!r} "
         f"captured at {most_recent.captured_git_sha[:12]} "
-        f"precedes the impl's last edit "
-        f"at {(last_touch or \"unknown\")[:12]}"
+        f"is not at-or-after every impl-ref last-touch "
+        f"({last_touch_repr})"
     )
     return [_build_issue(
         claim_kind, claim_name, ref_str, env,
