@@ -21,7 +21,12 @@ from unittest.mock import patch
 
 # pylint: disable=protected-access
 
-from iomoments_ontology import load_test_results_dag
+from iomoments_ontology import (
+    EnvironmentSpec,
+    TestResult,
+    TestResultsSnapshot,
+    load_test_results_dag,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -222,6 +227,89 @@ def test_build_results_records_missing_bpf_obj(tmp_path: Path) -> None:
 
 
 # --- main() end-to-end (mocked) ---------------------------------------
+
+
+def test_purge_drops_records_for_tested_failing_envs() -> None:
+    """Stale-pass-survives-regression bug fix: if a previously-
+    passing env starts failing, the producer must purge the prior
+    record, not leave it to falsely satisfy the freshness audit.
+    """
+    # Prior snapshot: v6.12 k=4 passed at SHA "old".
+    prior_env = EnvironmentSpec(
+        kind="vmtest", kernel="v6.12",
+        flags={"variant": "k4"}, fix_recipe="make bpf-test-vm-matrix",
+    )
+    unrelated_env = EnvironmentSpec(
+        kind="host", fix_recipe=".venv/bin/pytest {ref}",
+    )
+    prior_snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tooling/vmtest_matrix_producer.py",
+            environment=prior_env, outcome="pass",
+            captured_git_sha="o" * 40,
+            captured_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        ),
+        # An unrelated record (different ref) must NOT be touched.
+        TestResult(
+            verification_ref="tests/test_x.py::test_y",
+            environment=unrelated_env, outcome="pass",
+            captured_git_sha="o" * 40,
+            captured_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        ),
+    ])
+    # Current run: v6.12 k=4 failed (rc=255).
+    verdicts = {("v6.12", "k4"): 255}
+    out = _PRODUCER._purge_stale_for_failed_envs(
+        prior_snapshot, verdicts,
+    )
+    refs = {r.verification_ref for r in out.results}
+    assert "tooling/vmtest_matrix_producer.py" not in refs
+    assert "tests/test_x.py::test_y" in refs
+
+
+def test_purge_no_op_when_all_passed() -> None:
+    """No tested-but-failing envs → snapshot unchanged."""
+    prior_snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tooling/vmtest_matrix_producer.py",
+            environment=EnvironmentSpec(
+                kind="vmtest", kernel="v5.15",
+                flags={"variant": "k4"},
+                fix_recipe="make bpf-test-vm-matrix",
+            ),
+            outcome="pass", captured_git_sha="a" * 40,
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        ),
+    ])
+    verdicts = {("v5.15", "k4"): 0}  # passed
+    out = _PRODUCER._purge_stale_for_failed_envs(
+        prior_snapshot, verdicts,
+    )
+    assert out == prior_snapshot
+
+
+def test_purge_preserves_records_for_envs_we_didnt_test() -> None:
+    """A record for an env outside the verdict dict is preserved."""
+    prior_snapshot = TestResultsSnapshot(results=[
+        TestResult(
+            verification_ref="tooling/vmtest_matrix_producer.py",
+            environment=EnvironmentSpec(
+                kind="vmtest", kernel="v5.15",
+                flags={"variant": "k4"},
+                fix_recipe="make bpf-test-vm-matrix",
+            ),
+            outcome="pass", captured_git_sha="a" * 40,
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        ),
+    ])
+    # We tested v6.18 only (and it failed); v5.15 wasn't on the
+    # menu. Its prior pass survives.
+    verdicts = {("v6.18", "k4"): 255}
+    out = _PRODUCER._purge_stale_for_failed_envs(
+        prior_snapshot, verdicts,
+    )
+    assert len(out.results) == 1
+    assert out.results[0].environment.kernel == "v5.15"
 
 
 def test_main_returns_zero_when_every_kernel_has_one_pass(

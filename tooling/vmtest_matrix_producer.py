@@ -79,6 +79,18 @@ def _find_vmtest() -> str | None:
     return shutil.which("vmtest")
 
 
+def _print_failure(rc: int, stdout: str, stderr: str) -> None:
+    """Print captured bpftool output on a non-zero load (debug aid)."""
+    sys.stderr.write(
+        f"\n--- bpftool prog load output (rc={rc}) ---\n"
+    )
+    if stdout:
+        sys.stderr.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    sys.stderr.write("--- end ---\n")
+
+
 def _run_one(
     vmtest_bin: str,
     bpftool_bin: str,
@@ -91,6 +103,8 @@ def _run_one(
     Returns the vmtest exit code. Verifier rejection inside the
     guest typically surfaces as a non-zero exit; pinning happens
     inside the guest's tmpfs and disappears at boot teardown.
+    On non-zero exit, the captured bpftool output (which contains
+    the verifier-rejection log) is printed via _print_failure.
     """
     try:
         result = subprocess.run(
@@ -106,6 +120,8 @@ def _run_one(
         )
     except subprocess.TimeoutExpired:
         return 124
+    if result.returncode != 0:
+        _print_failure(result.returncode, result.stdout, result.stderr)
     return result.returncode
 
 
@@ -113,6 +129,15 @@ def _kernel_label(kernel_image: Path) -> str:
     """Return the short ``v6.18`` form from ``vmlinuz-v6.18``."""
     name = kernel_image.name
     return name[len("vmlinuz-"):] if name.startswith("vmlinuz-") else name
+
+
+def _env_for(label: str, variant_name: str) -> EnvironmentSpec:
+    return EnvironmentSpec(
+        kind="vmtest",
+        kernel=label,
+        flags={"variant": variant_name},
+        fix_recipe=_FIX_RECIPE,
+    )
 
 
 def _build_results(
@@ -125,12 +150,11 @@ def _build_results(
 ) -> tuple[list[TestResult], dict[tuple[str, str], int]]:
     """Run the matrix, return (passes, verdict-dict).
 
-    verdict-dict maps (kernel_label, variant) → exit code so the
-    caller can render the matrix and decide overall pass/fail.
+    verdict-dict maps (kernel_label, variant) → exit code (including
+    127 for missing .bpf.o). Caller uses verdicts to decide overall
+    pass/fail AND to identify tested-but-failing envs that need
+    stale-record purging.
     """
-    env_template = EnvironmentSpec(
-        kind="vmtest", fix_recipe=_FIX_RECIPE,
-    )
     results: list[TestResult] = []
     verdicts: dict[tuple[str, str], int] = {}
 
@@ -152,18 +176,51 @@ def _build_results(
             )
             verdicts[(label, variant_name)] = rc
             if rc == 0:
-                env = env_template.model_copy(update={
-                    "kernel": label,
-                    "flags": {"variant": variant_name},
-                })
                 results.append(TestResult(
                     verification_ref=_VERIFICATION_REF,
-                    environment=env,
+                    environment=_env_for(label, variant_name),
                     outcome="pass",
                     captured_git_sha=head_sha,
                     captured_at=captured_at,
                 ))
     return results, verdicts
+
+
+def _purge_stale_for_failed_envs(
+    snapshot: TestResultsSnapshot,
+    verdicts: dict[tuple[str, str], int],
+) -> TestResultsSnapshot:
+    """Drop prior records for envs we just tested but didn't pass.
+
+    A stale-pass-survives-regression bug otherwise: if v6.12 k=4
+    passed in a prior run (recorded) and fails in the current run
+    (no new record emitted, since we only emit passes per D015 §6),
+    the prior pass would still satisfy the freshness audit despite
+    the current observation contradicting it.
+
+    The matrix producer is a comprehensive sweep: anything we
+    tested-but-didn't-pass is the new ground truth (= no record).
+    Records for envs we DIDN'T test at all (different
+    verification_ref OR ref=ours but env outside our tested set)
+    are preserved.
+    """
+    failed_keys = {
+        _env_for(label, variant).natural_key()
+        for (label, variant), rc in verdicts.items()
+        if rc != 0
+    }
+    if not failed_keys:
+        return snapshot
+    survivors = [
+        r for r in snapshot.results
+        if not (
+            r.verification_ref == _VERIFICATION_REF
+            and r.environment.natural_key() in failed_keys
+        )
+    ]
+    if len(survivors) == len(snapshot.results):
+        return snapshot
+    return TestResultsSnapshot(results=survivors)
 
 
 def _print_matrix(verdicts: dict[tuple[str, str], int]) -> None:
@@ -183,10 +240,17 @@ def _print_matrix(verdicts: dict[tuple[str, str], int]) -> None:
 
 
 def _emit(
-    new_results: list[TestResult], dag_path: Path,
+    new_results: list[TestResult],
+    verdicts: dict[tuple[str, str], int],
+    dag_path: Path,
 ) -> None:
-    """Best-effort DAG write — never raises."""
-    if not new_results:
+    """Best-effort DAG write — never raises.
+
+    Purges stale records for envs that this run tested-but-failed
+    (so a prior pass on a now-failing env doesn't silently satisfy
+    the freshness audit), then adds the new pass records.
+    """
+    if not new_results and not verdicts:
         return
     try:
         with test_results_dag_transaction(
@@ -198,6 +262,7 @@ def _emit(
                 if current is not None
                 else TestResultsSnapshot()
             )
+            snapshot = _purge_stale_for_failed_envs(snapshot, verdicts)
             for r in new_results:
                 snapshot = prune_and_add_result(snapshot, r)
             snapshot_test_results_if_changed(
@@ -291,8 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _print_matrix(verdicts)
 
-    if head is not None and results:
-        _emit(results, args.dag)
+    if head is not None and verdicts:
+        _emit(results, verdicts, args.dag)
         print(
             f"\nvmtest_matrix_producer: emitted {len(results)} "
             f"TestResult(s) to {args.dag}",
