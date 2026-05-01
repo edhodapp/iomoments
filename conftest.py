@@ -59,11 +59,34 @@ def _producer_disabled() -> bool:
 _passed_nodeids: dict[str, bool] = {}
 
 
+def _normalize_nodeid(nodeid: str) -> str:
+    """Strip pytest's parameter-id suffix from a nodeid.
+
+    ``test_x[case_a]`` → ``test_x``. Ontology verification_refs use
+    the bare function name; without normalization, every PICT-
+    generated parametrization would be a distinct verification_ref
+    not referenced by any claim, and the audit would surface
+    ENV_NEVER_EXERCISED for the bare-name form. The producer keeps
+    a record for the bare name iff at least one parametrization
+    passed (PICT's intent — every case must pass for the claim to
+    hold; aggregating to bare name preserves that semantic when the
+    full suite runs).
+    """
+    bracket = nodeid.find("[")
+    return nodeid[:bracket] if bracket != -1 else nodeid
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None],
 ) -> Generator[None, Any, None]:
-    """Record pass/fail for the call phase of each test."""
+    """Record pass/fail for the call phase of each test.
+
+    For parametrized tests, also records under the bare-function-name
+    nodeid (no [...] suffix). The bare name is marked passed iff
+    every parametrization seen so far has passed (any failure flips
+    bare-name to False; subsequent passes don't undo it).
+    """
     del call  # unused — outcome.get_result() is what we need
     outcome = yield
     if _producer_disabled():
@@ -71,11 +94,16 @@ def pytest_runtest_makereport(
     report = outcome.get_result()
     if report.when != "call":
         return
-    # Mark passed iff the call phase had no failure/error AND the
-    # test wasn't skipped.
-    _passed_nodeids[item.nodeid] = (
-        report.outcome == "passed"
-    )
+    passed = report.outcome == "passed"
+    _passed_nodeids[item.nodeid] = passed
+    bare = _normalize_nodeid(item.nodeid)
+    if bare == item.nodeid:
+        return
+    # Bare name: AND-aggregate across parametrizations.
+    if bare not in _passed_nodeids:
+        _passed_nodeids[bare] = passed
+    else:
+        _passed_nodeids[bare] = _passed_nodeids[bare] and passed
 
 
 def _build_results(

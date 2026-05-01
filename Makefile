@@ -159,14 +159,11 @@ $(BUILD_DIR)/%: tests/c/%.c $(C_HEADERS) | $(BUILD_DIR)
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-test-c: $(C_TEST_BINS)
+test-c: $(C_TEST_BINS) $(VENV_STAMP)
 	@if [ -z "$(C_TEST_BINS)" ]; then \
 		echo "(no C tests)"; \
 	else \
-		for bin in $(C_TEST_BINS); do \
-			echo "Running $$bin"; \
-			"$$bin" || exit 1; \
-		done; \
+		$(VENV)/bin/python3 tooling/c_test_producer.py; \
 	fi
 
 # Monte Carlo statistical tests — separate from `test-c` because
