@@ -698,7 +698,98 @@ domain_constraints:
       - "Makefile:bpf-test-vm-matrix"
     verification_refs:
       - "tests/test_bpf_skeleton.py::test_bpf_verify_passes"
-      - "tooling/vmtest/matrix-sweep-2026-04-24.log"
+    status: tested
+
+  - name: bpf_k4_loads_in_supported_vmtest_kernels
+    description: >
+      iomoments' k=4 BPF program (D014's primary variant) loads
+      under vmtest on every supported kernel: v5.15, v6.1, v6.6,
+      v6.12. v6.17 and v6.18 are NOT in expected_environments for
+      k=4 — D014 §2 documents the boundary (verifier 1M-step budget
+      exhaustion above 6.12). The k=3 fallback's broader vmtest
+      coverage is the next claim.
+    rationale: >
+      D014 §1 (supported kernel range 5.15 through 6.12 inclusive).
+      Without per-kernel TestResult records, the matrix sweep is a
+      static frozen log; with them, the freshness audit demands a
+      re-run after every src/iomoments.bpf.c edit.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "tooling/vmtest_matrix_producer.py"
+    expected_environments:
+      - kind: vmtest
+        kernel: v5.15
+        flags:
+          variant: k4
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.1
+        flags:
+          variant: k4
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.6
+        flags:
+          variant: k4
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.12
+        flags:
+          variant: k4
+        fix_recipe: "make bpf-test-vm-matrix"
+    status: tested
+
+  - name: bpf_k3_loads_in_extended_vmtest_kernels
+    description: >
+      iomoments' k=3 fallback variant loads under vmtest on the
+      full extended kernel set: v5.15 through v6.18. The fallback's
+      job is "verifier-passes everywhere we know about"; pinning
+      this claim ensures any future regression where k=3 starts
+      failing on a kernel surfaces as a STALE_RESULT or
+      ENV_NEVER_EXERCISED gap.
+    rationale: >
+      D014 §2 (k=3 fallback) + D015 §2 freshness rule. Without
+      this, k=3 coverage is a prose claim only; with it, the
+      audit refuses to ship if k=3 stops loading on any tracked
+      kernel.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "tooling/vmtest_matrix_producer.py"
+    expected_environments:
+      - kind: vmtest
+        kernel: v5.15
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.1
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.6
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.12
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.17
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
+      - kind: vmtest
+        kernel: v6.18
+        flags:
+          variant: k3
+        fix_recipe: "make bpf-test-vm-matrix"
     status: tested
 
   - name: bpf_safe_multiprecision_arithmetic
