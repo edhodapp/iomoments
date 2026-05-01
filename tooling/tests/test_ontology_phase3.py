@@ -15,8 +15,10 @@ import time
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from iomoments_ontology import (
+    DAGNode,
     DomainConstraint,
     Ontology,
     OntologyDAG,
@@ -277,3 +279,28 @@ def test_transaction_serializes_concurrent_workers(
     # seed + 5 worker snapshots = 6 nodes, 5 edges (linear chain).
     assert len(reloaded.nodes) == 6
     assert len(reloaded.edges) == 5
+
+
+def test_ontology_dag_rejects_duplicate_node_ids() -> None:
+    """Mirrors TestResultsDAG's same validator. UUID-based IDs make
+    accidental collisions practically impossible, but a hand-edited
+    file or a bad merge could plant one — get_node returns first
+    match, while a future dict-based lookup would return last
+    match. Silent corruption.
+    """
+    with pytest.raises(ValidationError, match="duplicate DAGNode"):
+        OntologyDAG(
+            project_name="iomoments",
+            nodes=[
+                DAGNode(
+                    id="dup",
+                    ontology=Ontology(),
+                    created_at="2026-04-30T12:00:00Z",
+                ),
+                DAGNode(
+                    id="dup",
+                    ontology=Ontology(),
+                    created_at="2026-04-30T12:01:00Z",
+                ),
+            ],
+        )

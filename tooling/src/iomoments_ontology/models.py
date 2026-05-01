@@ -436,6 +436,26 @@ class OntologyDAG(BaseModel):
     edges: list[DAGEdge] = []
     current_node_id: str = ""
 
+    @model_validator(mode="after")
+    def _reject_duplicate_node_ids(self) -> "OntologyDAG":
+        """A duplicate node ID makes get_node ambiguous.
+
+        Mirrors the same validator on TestResultsDAG. UUID-based IDs
+        (via make_node_id) make collisions practically impossible,
+        but a hand-edited DAG file or a bad merge could plant one.
+        get_node iterates and returns first match; a future dict-
+        based lookup would return last match — silent divergence.
+        """
+        seen: set[str] = set()
+        for n in self.nodes:
+            if n.id in seen:
+                raise ValueError(
+                    f"duplicate DAGNode id={n.id!r}; "
+                    "node IDs must be unique within a DAG"
+                )
+            seen.add(n.id)
+        return self
+
     # --- Navigation ------------------------------------------------------
 
     def get_node(self, node_id: str) -> DAGNode | None:
@@ -601,10 +621,16 @@ class TestResultsSnapshot(BaseModel):
         for r in self.results:
             key = (r.verification_ref, r.environment.natural_key())
             if key in seen:
+                env = r.environment
+                env_desc = f"kind={env.kind!r}"
+                if env.kernel:
+                    env_desc += f" kernel={env.kernel!r}"
+                if env.distro:
+                    env_desc += f" distro={env.distro!r}"
                 raise ValueError(
                     f"duplicate TestResult for "
                     f"verification_ref={r.verification_ref!r} "
-                    f"in environment {r.environment.kind!r}"
+                    f"in environment ({env_desc})"
                 )
             seen.add(key)
         return self

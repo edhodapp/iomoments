@@ -165,6 +165,34 @@ def test_snapshot_rejects_same_ref_in_same_env() -> None:
         ])
 
 
+def test_snapshot_duplicate_error_includes_kernel_when_set() -> None:
+    """Duplicate-rejection message must distinguish vmtest entries by
+    kernel — "duplicate in environment 'vmtest'" alone is ambiguous
+    when the matrix has v5.15, v6.1, v6.6, v6.12 all kind='vmtest'.
+    """
+    base_kwargs = {
+        "verification_ref": "t",
+        "outcome": "pass",
+        "captured_git_sha": "a" * 40,
+        "captured_at": _ts(),
+    }
+    with pytest.raises(ValidationError, match="kernel='v6.18'"):
+        TestResultsSnapshot(results=[
+            TestResult(
+                environment=EnvironmentSpec(
+                    kind="vmtest", kernel="v6.18",
+                ),
+                **base_kwargs,  # type: ignore[arg-type]
+            ),
+            TestResult(
+                environment=EnvironmentSpec(
+                    kind="vmtest", kernel="v6.18",
+                ),
+                **base_kwargs,  # type: ignore[arg-type]
+            ),
+        ])
+
+
 def test_snapshot_rejects_collision_when_fix_recipe_differs() -> None:
     """fix_recipe is not part of natural_key — two results with the
     same (ref, kind/kernel/distro/arch/flags) collide regardless of
