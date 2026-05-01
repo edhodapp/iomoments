@@ -42,6 +42,7 @@ from iomoments_ontology import (
     TestResult,
     TestResultsSnapshot,
     prune_and_add_result,
+    prune_test_results_dag_nodes,
     snapshot_test_results_if_changed,
     test_results_dag_transaction,
 )
@@ -130,6 +131,11 @@ def emit_snapshot(
         _, created = snapshot_test_results_if_changed(
             dag, snapshot, label="pytest-session",
         )
+        # D015 §4 across-snapshot retention. Every producer write
+        # is the right time to prune ancient nodes; cheap when
+        # under the threshold (early-return), and bounds DAG file
+        # growth without requiring a separate maintenance task.
+        prune_test_results_dag_nodes(dag)
     return created
 
 

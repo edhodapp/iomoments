@@ -331,14 +331,31 @@ def save_test_results_dag(dag: TestResultsDAG, path: str) -> None:
 
 
 def test_results_content_hash(snapshot: TestResultsSnapshot) -> str:
-    """SHA-256 hex digest over a TestResultsSnapshot.
+    """SHA-256 hex digest over a TestResultsSnapshot, order-independent.
 
-    Used by ``snapshot_test_results_if_changed`` to decide whether
-    an append is a no-op. Same canonicalization rules as
-    ``ontology_content_hash``: list order is semantic, datetime
-    fields use ISO-string encoding, no Python repr leakage.
+    Unlike ``ontology_content_hash`` (where list order IS semantic
+    because authors deliberately order constraint sections), the
+    test-results DAG should be order-independent: a CI run on a
+    different machine may collect tests in a different filesystem
+    order, but if the resulting set of TestResults is identical
+    (same (ref, env, sha) triples with identical observations) the
+    snapshot is the same observation and should hash identically.
+    Without sorting, two machines could produce DAG churn from
+    pure traversal-order drift.
+
+    Sort key: (verification_ref, env.natural_key()) — the same key
+    used by the duplicate-rejection validator and the audit's per-
+    (ref, env) lookup, so sort-canonical and identity-canonical
+    agree.
     """
-    return _canonical_hash(snapshot)
+    sorted_results = sorted(
+        snapshot.results,
+        key=lambda r: (
+            r.verification_ref, r.environment.natural_key(),
+        ),
+    )
+    canonical = TestResultsSnapshot(results=sorted_results)
+    return _canonical_hash(canonical)
 
 
 def save_test_results_snapshot(
