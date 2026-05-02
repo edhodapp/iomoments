@@ -792,6 +792,32 @@ domain_constraints:
         fix_recipe: "make bpf-test-vm-matrix"
     status: tested
 
+  - name: bpf_per_event_overhead_measured
+    description: >
+      The BPF program's per-event CPU overhead is measured on the
+      host kernel via the kernel's bpf_stats_enabled accounting
+      (run_time_ns / run_cnt). The measurement is a precondition
+      for the spec-level perf constraints (probe_phase_overhead
+      etc.) — without periodic measurement, those budgets are
+      aspirational only. Pinning the perf script as a verification
+      ref ensures the freshness audit demands a re-measure when
+      src/iomoments.bpf.c changes.
+    rationale: >
+      D014 perf-discipline + D015 §2 freshness rule. Audit cannot
+      verify "perf claims still hold" without seeing recent
+      measurement output. Measurements themselves live in the
+      TestResult.measurements dict; comparison vs PerformanceConstraint
+      budgets is a future audit enrichment.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "scripts/measure_bpf_overhead.sh"
+    expected_environments:
+      - kind: host-perf
+        fix_recipe: "sudo make bpf-overhead"
+    status: tested
+
   - name: bpf_safe_multiprecision_arithmetic
     description: >
       The BPF k=4 hot path computes products and sums whose

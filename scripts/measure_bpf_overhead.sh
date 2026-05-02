@@ -226,7 +226,35 @@ for prog in iomoments_rq_issue iomoments_rq_complete; do
 	echo "  events:           $CNT_DELTA"
 	echo "  total_run_time_ns: $RT_DELTA"
 	echo "  per_event_ns:     $PER_EVENT_NS"
+	# Capture machine-readable values for the D015 perf producer.
+	# Two programs (rq_issue / rq_complete) share one summary file;
+	# each loop iteration appends its key=value rows.
+	if [ "$prog" = "iomoments_rq_issue" ]; then
+		PE_NS_ISSUE="$PER_EVENT_NS"
+		EV_ISSUE="$CNT_DELTA"
+	else
+		PE_NS_COMPLETE="$PER_EVENT_NS"
+		EV_COMPLETE="$CNT_DELTA"
+	fi
 done
+
+# D015 §7 producer wiring: write key=value summary for the
+# tooling/perf_producer.py to consume into a TestResult record.
+# Build dir resolution mirrors the BPF_OBJS arguments — first
+# .bpf.o lives in the build dir.
+SUMMARY_DIR=$(dirname "$1")
+SUMMARY_FILE="${SUMMARY_DIR}/perf-summary.txt"
+{
+	echo "kernel=$KERNEL_REL"
+	echo "variant=$LOADED_VARIANT"
+	[ -n "${PE_NS_ISSUE:-}" ] && echo "per_event_ns_issue=$PE_NS_ISSUE"
+	[ -n "${EV_ISSUE:-}" ] && echo "events_issue=$EV_ISSUE"
+	[ -n "${PE_NS_COMPLETE:-}" ] && \
+		echo "per_event_ns_complete=$PE_NS_COMPLETE"
+	[ -n "${EV_COMPLETE:-}" ] && echo "events_complete=$EV_COMPLETE"
+} >"$SUMMARY_FILE"
+echo
+echo "perf summary: $SUMMARY_FILE"
 
 if [ "$OBSERVED_ANY" -eq 0 ]; then
 	echo >&2

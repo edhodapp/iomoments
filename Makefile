@@ -414,7 +414,7 @@ bpf-test-vm-matrix: $(BPF_OBJS) $(BPF_K3_OBJS) $(VENV_STAMP)
 # to k=3 on verifier rejection (mirrors the runtime selection in
 # src/iomoments.c). Requires sudo.
 # ---------------------------------------------------------------------------
-bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS)
+bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS) $(VENV_STAMP)
 	@if [ -z "$(BPF_OBJS)" ]; then \
 		echo "(no BPF sources; bpf-overhead is a no-op today.)"; \
 	else \
@@ -422,6 +422,7 @@ bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS)
 		echo "Requires sudo for BPF attach + sysctl + direct I/O."; \
 		sudo scripts/measure_bpf_overhead.sh \
 			$(BPF_OBJS) $(BPF_K3_OBJS); \
+		$(VENV)/bin/python3 tooling/perf_producer.py; \
 	fi
 
 # Same measurement but inside a vmtest guest with a loopback disk —
