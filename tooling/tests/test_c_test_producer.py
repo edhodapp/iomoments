@@ -125,6 +125,40 @@ def test_discover_returns_empty_for_missing_file(tmp_path: Path) -> None:
     ) == []
 
 
+def test_discover_rejects_forward_declarations(tmp_path: Path) -> None:
+    """``static void test_x(void);`` is a prototype, not a definition.
+
+    Pre-fix: the regex matched the prototype anyway, so the producer
+    would record a passing TestResult for a function that may not
+    actually exist or run. Updated regex requires ``{`` (definition
+    body opener) after the ``(void)``.
+    """
+    src = tmp_path / "test_x.c"
+    src.write_text(
+        "static void test_proto_only(void);\n"
+        "static void test_real(void) {\n"
+        "    return;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    fns = _PRODUCER._discover_test_functions(src)
+    assert fns == ["test_real"]
+
+
+def test_discover_handles_brace_on_next_line(tmp_path: Path) -> None:
+    """K&R brace style: ``static void test_x(void)\\n{``."""
+    src = tmp_path / "test_x.c"
+    src.write_text(
+        "static void test_x(void)\n"
+        "{\n"
+        "    return;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    fns = _PRODUCER._discover_test_functions(src)
+    assert fns == ["test_x"]
+
+
 def test_discover_skips_function_calls(tmp_path: Path) -> None:
     """Regex must reject ``test_x();`` (a call) inside main()."""
     src = tmp_path / "test_x.c"

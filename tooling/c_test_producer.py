@@ -58,8 +58,14 @@ _FIX_RECIPE_TEMPLATE = "make test-c"
 # iomoments' C tests use this shape uniformly (verified across all
 # tests/c/test_*.c). A trailing brace may or may not be on the same
 # line; we don't care, only the function name.
+# Match ``[static] void test_<name>(void)`` followed by ``{`` (the
+# function body opener — same line or next line). Trailing ``;``
+# (a forward declaration) is excluded. iomoments' tests use the
+# brace-on-same-line shape uniformly; the optional whitespace
+# absorbs the "open brace next line" K&R variant.
 _TEST_FN_RE = re.compile(
-    r"^\s*(?:static\s+)?void\s+(test_[A-Za-z0-9_]+)\s*\(\s*void\s*\)",
+    r"^\s*(?:static\s+)?void\s+(test_[A-Za-z0-9_]+)\s*"
+    r"\(\s*void\s*\)\s*(?:\{|\n\s*\{)",
     re.MULTILINE,
 )
 
@@ -92,6 +98,27 @@ def _run_binary(binary: Path) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
+def _ref_path(source: Path, test_dir: Path) -> str:
+    """Return the repo-relative path string used in verification_refs.
+
+    Handles three input shapes uniformly:
+    - Already-relative path (Makefile passes ``tests/c/test_x.c``):
+      use as-is.
+    - Absolute path inside the repo: relative_to(repo_root).
+    - Absolute path outside the repo (ad-hoc invocation): the
+      relative_to call would raise ValueError; fall back to using
+      the basename joined under tests/c (best-effort, the audit
+      will surface the resulting ref's resolution status).
+    """
+    if not source.is_absolute():
+        return source.as_posix()
+    repo_root = test_dir.parent.parent
+    try:
+        return source.relative_to(repo_root).as_posix()
+    except ValueError:
+        return (Path("tests/c") / source.name).as_posix()
+
+
 def _emit_for_pass(
     source: Path,
     test_dir: Path,
@@ -106,7 +133,7 @@ def _emit_for_pass(
             f"WARN    {source} contains no test_*() functions",
             file=sys.stderr,
         )
-    rel = source.relative_to(test_dir.parent.parent)
+    rel = _ref_path(source, test_dir)
     return [
         TestResult(
             verification_ref=f"{rel}:{fn}",
@@ -117,6 +144,18 @@ def _emit_for_pass(
         )
         for fn in functions
     ]
+
+
+def _print_failure_streams(stdout: str, stderr: str) -> None:
+    """Echo BOTH streams on a non-zero binary exit.
+
+    C assertion-failure macros often print file/line context to
+    stdout; the diagnostic is much harder to use without it.
+    """
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
 
 
 def _build_results(
@@ -150,7 +189,7 @@ def _build_results(
             continue
         if rc != 0:
             failed.append(str(binary))
-            sys.stderr.write(stderr)
+            _print_failure_streams(stdout, stderr)
             print(f"FAIL    {binary} (exit {rc})", file=sys.stderr)
             continue
         new = _emit_for_pass(
