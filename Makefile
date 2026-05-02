@@ -163,7 +163,8 @@ test-c: $(C_TEST_BINS) $(VENV_STAMP)
 	@if [ -z "$(C_TEST_BINS)" ]; then \
 		echo "(no C tests)"; \
 	else \
-		$(VENV)/bin/python3 tooling/c_test_producer.py; \
+		$(VENV)/bin/python3 tooling/c_test_producer.py \
+			--sources $(C_TEST_FAST_SOURCES); \
 	fi
 
 # Monte Carlo statistical tests — separate from `test-c` because

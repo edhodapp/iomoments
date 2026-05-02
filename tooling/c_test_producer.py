@@ -120,12 +120,20 @@ def _emit_for_pass(
 
 
 def _build_results(
+    sources: list[Path],
     test_dir: Path,
     build_dir: Path,
     head_sha: str,
     captured_at: datetime,
 ) -> tuple[list[TestResult], list[str], list[str]]:
-    """Run every test binary, return (passes, failed_binaries, missing)."""
+    """Run the given test binaries, return (passes, failed, missing).
+
+    ``sources`` is the explicit list of tests/c/test_*.c source files
+    to run (binaries derived from each source's stem). Caller passes
+    the Makefile's C_TEST_BINS-equivalent list rather than the
+    producer globbing — that prevents capturing tests excluded from
+    the fast suite (e.g., test_mc which has its own slow harness).
+    """
     env = EnvironmentSpec(
         kind="host", fix_recipe=_FIX_RECIPE_TEMPLATE,
     )
@@ -133,7 +141,7 @@ def _build_results(
     failed: list[str] = []
     missing: list[str] = []
 
-    for source in sorted(test_dir.glob("test_*.c")):
+    for source in sorted(sources):
         binary = build_dir / source.stem
         rc, stdout, stderr = _run_binary(binary)
         if rc == 127:
@@ -180,10 +188,7 @@ def _emit(
         traceback.print_exc()
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point. Exit 1 iff any binary failed (preserves make
-    test-c gating). DAG persistence is best-effort and never fails
-    the run."""
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     repo_root_default = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description="Run C tests, emit per-function TestResults to DAG.",
@@ -197,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
         default=repo_root_default / "tests" / "c",
     )
     parser.add_argument(
+        "--sources", type=Path, nargs="*", default=None,
+        help=(
+            "Explicit list of test_*.c source files to run. If "
+            "omitted, the producer globs test-dir for test_*.c "
+            "(useful for ad-hoc invocation but matches MC tests "
+            "that may not be built)."
+        ),
+    )
+    parser.add_argument(
         "--dag", type=Path,
         default=(
             repo_root_default
@@ -208,36 +222,48 @@ def main(argv: list[str] | None = None) -> int:
         "--repo-root", type=Path,
         default=repo_root_default,
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
+
+def _report_problems(failed: list[str], missing: list[str]) -> None:
+    """Print failure / missing summaries to stderr."""
+    if failed:
+        joined = ", ".join(failed)
+        print(
+            f"\n{len(failed)} binary failure(s): {joined}",
+            file=sys.stderr,
+        )
+    if missing:
+        joined = ", ".join(missing)
+        print(
+            f"\n{len(missing)} binary missing: {joined}",
+            file=sys.stderr,
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point. Exit 1 iff any binary failed or was missing
+    (preserves ``make test-c`` gating). DAG persistence is best-
+    effort and never fails the run."""
+    args = _parse_args(argv)
     head = git_helpers.head_sha(args.repo_root)
     captured_at = datetime.now(timezone.utc)
-
+    if args.sources:
+        sources = list(args.sources)
+    else:
+        sources = sorted(args.test_dir.glob("test_*.c"))
     results, failed, missing = _build_results(
-        args.test_dir, args.build_dir,
+        sources, args.test_dir, args.build_dir,
         head or "0" * 40, captured_at,
     )
-
     if head is not None and results:
         _emit(results, args.dag)
         print(
             f"c_test_producer: emitted {len(results)} TestResult(s) "
             f"from {len(results)} test functions",
         )
-
     if failed or missing:
-        if failed:
-            joined = ", ".join(failed)
-            print(
-                f"\n{len(failed)} binary failure(s): {joined}",
-                file=sys.stderr,
-            )
-        if missing:
-            joined = ", ".join(missing)
-            print(
-                f"\n{len(missing)} binary missing: {joined}",
-                file=sys.stderr,
-            )
+        _report_problems(failed, missing)
         return 1
     return 0
 

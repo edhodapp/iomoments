@@ -185,6 +185,7 @@ def test_build_results_pass_emits_one_per_function(
     _make_pass_binary(build_dir / "test_x")
 
     results, failed, missing = _PRODUCER._build_results(
+        sorted(test_dir.glob("test_*.c")),
         test_dir, build_dir, "a" * 40,
         datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
@@ -211,6 +212,7 @@ def test_build_results_failed_binary_emits_nothing(
     _make_fail_binary(build_dir / "test_x")
 
     results, failed, missing = _PRODUCER._build_results(
+        sorted(test_dir.glob("test_*.c")),
         test_dir, build_dir, "a" * 40,
         datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
@@ -230,6 +232,7 @@ def test_build_results_missing_binary_recorded(tmp_path: Path) -> None:
     # NOTE: deliberately don't create build/test_x
 
     results, failed, missing = _PRODUCER._build_results(
+        sorted(test_dir.glob("test_*.c")),
         test_dir, build_dir, "a" * 40,
         datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
@@ -251,6 +254,7 @@ def test_build_results_uses_host_env_with_make_recipe(
     _make_pass_binary(build_dir / "test_x")
 
     results, _, _ = _PRODUCER._build_results(
+        sorted(test_dir.glob("test_*.c")),
         test_dir, build_dir, "a" * 40,
         datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
