@@ -422,7 +422,8 @@ bpf-overhead: $(BPF_OBJS) $(BPF_K3_OBJS) $(VENV_STAMP)
 		echo "Requires sudo for BPF attach + sysctl + direct I/O."; \
 		sudo scripts/measure_bpf_overhead.sh \
 			$(BPF_OBJS) $(BPF_K3_OBJS); \
-		$(VENV)/bin/python3 tooling/perf_producer.py; \
+		sudo -u "$${SUDO_USER:-$$USER}" \
+			$(VENV)/bin/python3 tooling/perf_producer.py; \
 	fi
 
 # Same measurement but inside a vmtest guest with a loopback disk —
@@ -447,18 +448,18 @@ bpf-overhead-vm: $(BPF_OBJS) $(BPF_K3_OBJS)
 # YAML, forgot to rebuild" drift), then audits with --exit-nonzero-on-gap.
 #
 # --enforce-freshness enables D015 §2 freshness checking against the
-# test-results DAG. --bootstrap is D015 §8's escape valve during the
-# producer-wiring window: ENV_NEVER_EXERCISED and RUNNER_FORGOT downgrade
-# to warnings (visibility, not gating), while STALE_RESULT and
-# UNTRACKED_FILE continue to gate. Removed from the Make target once all
-# producers in D015 §7 are wired.
+# test-results DAG. The --bootstrap escape valve was removed once all
+# five D015 §7 producers (pytest, AWS probe, C-test, vmtest matrix,
+# perf measurement) had populated records satisfying every claim's
+# expected_environments. From this commit forward, ENV_NEVER_EXERCISED
+# and RUNNER_FORGOT are real signals that gate the push.
 # ---------------------------------------------------------------------------
 build-ontology: $(VENV_STAMP)
 	$(VENV)/bin/build-iomoments-ontology
 
 gate-ontology: build-ontology
 	$(VENV)/bin/audit-ontology --exit-nonzero-on-gap \
-		--enforce-freshness --bootstrap
+		--enforce-freshness
 
 # ---------------------------------------------------------------------------
 # Meta.
