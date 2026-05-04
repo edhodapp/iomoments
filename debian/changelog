@@ -1,0 +1,11 @@
+iomoments (0.1.0) unstable; urgency=medium
+
+  * Initial Debian/Ubuntu binary package.
+  * Userspace collector + BPF programs (k=4 default, k=3 fallback for
+    kernels >= 6.17 where the k=4 verifier budget is exceeded).
+  * Self-resolving BPF object lookup via /proc/self/exe — same binary
+    works in-tree (build/iomoments + build/*.bpf.o siblings) and after
+    install (/usr/bin/iomoments + /usr/lib/iomoments/*.bpf.o).
+  * FHS layout: binary in /usr/bin, BPF objects in /usr/lib/iomoments/.
+
+ -- Ed Hodapp <ed@hodapp.com>  Mon, 04 May 2026 00:00:00 +0000

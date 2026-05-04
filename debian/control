@@ -1,0 +1,34 @@
+Source: iomoments
+Section: admin
+Priority: optional
+Maintainer: Ed Hodapp <ed@hodapp.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ clang,
+ libbpf-dev,
+ libelf-dev,
+ zlib1g-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/edhodapp/iomoments
+Vcs-Git: https://github.com/edhodapp/iomoments.git
+Vcs-Browser: https://github.com/edhodapp/iomoments
+Rules-Requires-Root: no
+
+Package: iomoments
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: honest infeasibility-reporting I/O moment collector
+ iomoments collects per-window method-of-moments statistics (mean,
+ variance, skewness, kurtosis) from BPF tracepoints on the block I/O
+ path and refuses workloads where the inputs would mislead, instead of
+ producing wrong-but-confident output.
+ .
+ A twelve-signal verdict layer (Carleman ratio, Hill alpha, Jarque-Bera,
+ sample-rate adequacy, and others) gates each output window. When a
+ signal trips, iomoments reports the failure mode rather than emitting
+ numbers that the underlying distribution does not support.
+ .
+ Beta-trial quality. Requires Linux >= 5.15 with BPF, BTF, and ring-buffer
+ support (CONFIG_BPF, CONFIG_BPF_SYSCALL, CONFIG_DEBUG_INFO_BTF).

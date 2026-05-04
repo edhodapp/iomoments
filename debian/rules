@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+# debian/rules for iomoments. Delegates to the project's existing
+# Makefile, which already honors DESTDIR and PREFIX per FHS.
+
+%:
+	dh $@
+
+# No autoconf-style configure step.
+override_dh_auto_configure:
+
+# Build the userspace binary + both BPF object variants.
+override_dh_auto_build:
+	$(MAKE) iomoments-build
+
+# Install via the project Makefile's `install` target so the binary
+# and BPF objects land in the FHS layout the /proc/self/exe resolver
+# expects (BINDIR + LIBDIR/iomoments siblings).
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/iomoments PREFIX=/usr
+
+# The full test suite needs vmtest infrastructure that is not present
+# in a Debian build chroot. C unit tests + ontology audit run at the
+# project level via `make test`; gating those here would require
+# pulling in the entire Python toolchain. Skipped deliberately.
+override_dh_auto_test:
+
+# BPF .bpf.o files are valid ELF objects but cannot be processed by
+# regular `strip` — it removes BTF, line-info, and func-info that the
+# kernel verifier needs. Exclude them from dh_strip; clang already
+# emitted them with -O2 + -g and they are already small.
+override_dh_strip:
+	dh_strip --exclude=.bpf.o
+
+# Same logic for dh_dwz (DWARF debuglink compression): runs strip-like
+# operations on ELF files. .bpf.o is an ELF file, but dwz mangles its
+# BTF section. Skip it explicitly.
+override_dh_dwz:
+	dh_dwz --exclude=.bpf.o

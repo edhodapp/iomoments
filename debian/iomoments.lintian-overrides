@@ -1,0 +1,11 @@
+# BPF object files are intentionally compiled with -target bpf (EM_BPF in
+# the ELF header), not the host architecture. They are architecture-
+# independent kernel programs loaded by libbpf at runtime. Lintian's
+# binary-from-other-architecture check inspects the ELF e_machine field
+# and flags BPF as foreign — but BPF is BPF on every host arch.
+iomoments: binary-from-other-architecture [usr/lib/iomoments/iomoments.bpf.o]
+iomoments: binary-from-other-architecture [usr/lib/iomoments/iomoments-k3.bpf.o]
+
+# No man page yet. README.md is shipped to /usr/share/doc/iomoments/ and
+# `iomoments --help` prints usage. Man page is queued post-v0.1.0.
+iomoments: no-manual-page [usr/bin/iomoments]
