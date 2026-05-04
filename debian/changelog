@@ -1,3 +1,16 @@
+iomoments (0.1.1) unstable; urgency=medium
+
+  * First binary release with arch-portable build:
+    - Makefile detects host multiarch triple via `gcc -print-multiarch`
+      and BPF target arch via `uname -m`, replacing hardcoded x86 paths.
+      Same Makefile builds on amd64 (laptop / cloud x86) and arm64
+      (Raspberry Pi 5, AWS Graviton).
+    - Two binary packages produced: amd64 (host: Ubuntu 24.04) and
+      arm64 (host: Debian 13). Both built natively per arch.
+  * No userspace API or runtime-behavior changes from 0.1.0.
+
+ -- Ed Hodapp <ed@hodapp.com>  Mon, 04 May 2026 14:00:00 +0000
+
 iomoments (0.1.0) unstable; urgency=medium
 
   * Initial Debian/Ubuntu binary package.

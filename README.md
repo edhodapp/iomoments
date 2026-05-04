@@ -80,6 +80,86 @@ roadmap). FreeBSD, macOS, and BSD classic BPF are explicitly out of
 scope — those systems have different tracing primitives (DTrace, the
 FreeBSD experimental eBPF port) and would be separate artifacts.
 
+## Installation
+
+Three install paths are supported, ordered from least-effort to most.
+All produce the same userspace binary plus two BPF object variants
+(`iomoments.bpf.o` for k=4, `iomoments-k3.bpf.o` for the k=3 verifier
+fallback).
+
+### From `.deb` (Debian / Ubuntu)
+
+Pre-built binary packages for `amd64` and `arm64` ship attached to
+each tagged GitHub release.
+
+```
+# amd64 (laptops, cloud x86, etc.)
+curl -LO https://github.com/edhodapp/iomoments/releases/download/v0.1.1/iomoments_0.1.1_amd64.deb
+sudo dpkg -i iomoments_0.1.1_amd64.deb
+
+# arm64 (Raspberry Pi 5, AWS Graviton, etc.)
+curl -LO https://github.com/edhodapp/iomoments/releases/download/v0.1.1/iomoments_0.1.1_arm64.deb
+sudo dpkg -i iomoments_0.1.1_arm64.deb
+```
+
+The package depends on `libbpf1`, `libelf1t64`, and `zlib1g`, which
+are in the default repositories on Debian 12+ and Ubuntu 22.04+. If
+`dpkg -i` complains about unmet dependencies, run
+`sudo apt -f install` to fetch them.
+
+### From prebuilt x86_64 tarball
+
+The v0.1.0 release ships a self-contained `x86_64` tarball with the
+prebuilt userspace binary plus both BPF objects. Extract and run in
+place — the `/proc/self/exe`-based BPF object resolver locates its
+`.bpf.o` siblings without any flag plumbing.
+
+```
+curl -LO https://github.com/edhodapp/iomoments/releases/download/v0.1.0/iomoments-0.1.0-x86_64-linux.tar.gz
+tar xzf iomoments-0.1.0-x86_64-linux.tar.gz
+sudo ./iomoments-0.1.0/iomoments --duration=10
+```
+
+For `arm64`, use the `.deb` path above or build from source.
+
+### From source
+
+Build dependencies on Debian 12+ / Ubuntu 22.04+:
+
+```
+sudo apt install -y clang libbpf-dev libelf-dev zlib1g-dev make
+```
+
+For the full developer pipeline (tests + four-engine C lint + ontology
+audit) also install `gcc clang-tools cppcheck clang-format shellcheck
+python3-venv linux-tools-common linux-tools-generic`. Other
+distributions (Fedora, Arch, etc.) are expected to work; package
+names differ.
+
+```
+git clone https://github.com/edhodapp/iomoments.git
+cd iomoments
+make iomoments-build              # builds build/iomoments + BPF objects
+sudo make install                 # default: PREFIX=/usr/local
+sudo make install PREFIX=/usr     # distro-style
+```
+
+`make install` honors the GNU `DESTDIR` and `PREFIX` conventions.
+The binary lands at `$(PREFIX)/bin/iomoments`; the two BPF objects
+land at `$(PREFIX)/lib/iomoments/`. Both `./build/iomoments` (in-tree)
+and `iomoments` (post-install) work the same way.
+
+### Run
+
+```
+sudo iomoments --duration=10 --window=100
+```
+
+`sudo` is required for the BPF program load + tracepoint attach
+(equivalently, `CAP_BPF` + `CAP_PERFMON`). The report emits Level 1
+moments, the Level 2 Nyquist diagnostic, and the D007 verdict with
+per-signal breakdown.
+
 ## Algorithm
 
 Online moment updates use Pébay's formulas (Sandia SAND2008-6212), a
@@ -171,91 +251,6 @@ vmtest pass on every kernel in the supported matrix.
   20.04 = 5.15 floor witness, Ubuntu 22.04 = 6.8 HWE, Amazon
   Linux 2023 = 6.18) and verifies vmtest predictions hold under
   vendor-patched cloud kernels.
-
-## Installation
-
-### Build dependencies
-
-<!-- claim -->Required system packages on Ubuntu 24.04 LTS (the
-reference build target — Python 3.12 is the system default, and
-the kernel-tools metapackage names are Ubuntu-specific):<!-- /claim -->
-
-```
-sudo apt install \
-    clang libbpf-dev linux-libc-dev \
-    linux-tools-common linux-tools-generic \
-    make python3-venv
-```
-
-For the full developer pipeline (tests + four-engine C lint + ontology
-audit) also install:
-
-```
-sudo apt install \
-    gcc clang-tools cppcheck clang-format \
-    shellcheck
-```
-
-Other distributions (Debian, Fedora, Arch) are expected to work,
-but the kernel-tools package names differ (e.g., `linux-perf` on
-Debian) and Python 3.11+ may need a non-default install. Distro-
-specific build recipes are not maintained.
-
-### Build
-
-```
-make iomoments-build
-```
-
-Produces `build/iomoments` (userspace binary) and the two BPF
-objects `build/iomoments.bpf.o` (k=4) and
-`build/iomoments-k3.bpf.o` (k=3 fallback).
-
-### Install (optional)
-
-```
-sudo make install                       # default: PREFIX=/usr/local
-sudo make install PREFIX=/usr           # distro-style
-make install DESTDIR=/tmp/staging \
-            PREFIX=/usr                 # staged build for packagers
-```
-
-`make install` honors the GNU `DESTDIR` and `PREFIX` conventions.
-The binary lands at `$(PREFIX)/bin/iomoments`; the two BPF objects
-land at `$(PREFIX)/lib/iomoments/`. The userspace binary resolves
-its BPF objects via `/proc/self/exe`, so it works both in-tree
-(`./build/iomoments`) and after install (`/usr/local/bin/iomoments`)
-without any flag plumbing.
-
-### Run
-
-```
-sudo ./build/iomoments --duration=10 --window=100   # in-tree
-sudo iomoments --duration=10 --window=100           # after install
-```
-
-`sudo` is required for BPF program load + tracepoint attach. The
-report emits Level 1 moments, Level 2 Nyquist diagnostic, and the
-D007 verdict with per-signal breakdown.
-
-## Distribution
-
-iomoments is open source under AGPL-3.0-or-later. Source builds
-are the canonical install path — the Installation section above
-covers Ubuntu 24.04 LTS as the reference target, and other Linux
-distributions are expected to work with locally-substituted package
-names. `sudo make install` puts the binary on `$PATH` for users
-who want it system-wide.
-
-Convenience channels for users who'd rather not compile are
-planned, not yet shipped:
-
-- **GitHub release tarballs.** Pre-built `iomoments-x86_64-linux.tar.gz`
-  attached to tagged versions, ready to extract and run.
-- **Debian/Ubuntu `.deb`.** Ubuntu 24.04 LTS as the reference
-  target.
-
-Both will land before the first non-beta release.
 
 ## Roadmap (post-ship)
 
