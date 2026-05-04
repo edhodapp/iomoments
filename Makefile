@@ -43,10 +43,26 @@ CFLAGS_LINT_GCC := $(CFLAGS_LINT) -Wnull-dereference
 # clang-only additions.
 CFLAGS_LINT_CLANG := $(CFLAGS_LINT) -Wthread-safety
 
+# Host-multiarch include path. clang -target bpf still needs the host's
+# <asm/types.h> for <linux/bpf.h>, and Debian/Ubuntu split that header
+# under /usr/include/$(triple)/. Detect the triple from gcc rather than
+# hardcoding x86 so arm64 (Pi 5, AWS Graviton) builds the same way.
+HOST_MULTIARCH := $(shell $(CC_GCC) -print-multiarch 2>/dev/null)
+HOST_ARCH      := $(shell uname -m)
+ifeq ($(HOST_ARCH),x86_64)
+  BPF_TARGET_ARCH := x86
+else ifeq ($(HOST_ARCH),aarch64)
+  BPF_TARGET_ARCH := arm64
+else ifeq ($(HOST_ARCH),arm64)
+  BPF_TARGET_ARCH := arm64
+else
+  BPF_TARGET_ARCH := $(HOST_ARCH)
+endif
+
 # BPF compile flags — clang-only, no cross-unit prototype checks.
-# -I/usr/include/x86_64-linux-gnu picks up `asm/types.h` when compiling
-# under -target bpf; otherwise Ubuntu's multiarch-split headers aren't
-# on the search path.
+# -I/usr/include/$(HOST_MULTIARCH) picks up `asm/types.h` when compiling
+# under -target bpf; otherwise Debian/Ubuntu's multiarch-split headers
+# aren't on the search path.
 # -std=gnu11 (not c11) because bpf_helpers.h uses GNU `asm volatile`
 # extensions to nudge the verifier on certain helper calls; -std=c11
 # rejects those as "undeclared identifier 'asm'".
@@ -60,8 +76,8 @@ CFLAGS_LINT_BPF := -Wall -Wextra -Wpedantic -Werror -Wshadow \
                    -Wdouble-promotion -Wformat=2 -Wcast-align \
                    -Wconversion -Wmissing-field-initializers -std=gnu11 \
                    -Wno-language-extension-token -Wno-unused-parameter \
-                   -target bpf -D__TARGET_ARCH_x86 -O2 \
-                   -I/usr/include/x86_64-linux-gnu
+                   -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) -O2 \
+                   -I/usr/include/$(HOST_MULTIARCH)
 
 # Sources collected by walking the tree; no hardcoded file lists.
 C_SOURCES       := $(shell find src -maxdepth 2 -type f -name '*.c' \
@@ -256,8 +272,8 @@ lint-c-tidy:
 			echo "clang-tidy (bpf) $$f"; \
 			$(CLANG_TIDY) --warnings-as-errors='*' $$f \
 			  -- -target bpf -std=gnu11 -Isrc \
-			  -I/usr/include/x86_64-linux-gnu \
-			  -D__TARGET_ARCH_x86 || exit 1; \
+			  -I/usr/include/$(HOST_MULTIARCH) \
+			  -D__TARGET_ARCH_$(BPF_TARGET_ARCH) || exit 1; \
 		done; \
 	fi
 
