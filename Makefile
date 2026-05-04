@@ -94,9 +94,25 @@ CPPCHECK_SUPPRESS := tooling/cppcheck.suppress
 .PHONY: help venv install-hooks test test-c test-mc \
         lint lint-python lint-c lint-c-compile lint-c-tidy lint-c-cppcheck \
         lint-c-scanbuild fmt-check bpf-compile bpf-verify bpf-test-vm \
-        bpf-test-vm-matrix iomoments-build \
+        bpf-test-vm-matrix iomoments-build install uninstall \
         build-ontology gate-ontology \
         clean gate-local distclean
+
+# ---------------------------------------------------------------------------
+# Install layout (FHS). DESTDIR is for staged/distro builds; PREFIX is
+# the install root inside DESTDIR. Defaults match the GNU coding
+# standard so distro packagers don't need overrides.
+#
+# The binary resolves its BPF objects via /proc/self/exe, looking
+# beside itself first (dev workflow: build/iomoments + build/*.bpf.o)
+# and then in ../lib/iomoments/ (this layout). Keep $(BINDIR) and
+# $(LIBDIR)/iomoments as siblings or the resolver breaks.
+# ---------------------------------------------------------------------------
+DESTDIR  ?=
+PREFIX   ?= /usr/local
+BINDIR   ?= $(PREFIX)/bin
+LIBDIR   ?= $(PREFIX)/lib
+INSTALL  ?= install
 
 # vmtest (D012) reads the guest kernel from here. Ubuntu's shipped
 # /boot/vmlinuz-* is modular — vmtest can't boot it without an
@@ -127,6 +143,8 @@ help:
 	@echo "  bpf-overhead   Honest per-event overhead measurement on host kernel (sudo)."
 	@echo "  bpf-overhead-vm  Same, inside vmtest under KERNEL_IMAGE (loopback disk)."
 	@echo "  iomoments-build Compile the userspace iomoments binary."
+	@echo "  install        Install binary + BPF objects (FHS, honors DESTDIR/PREFIX)."
+	@echo "  uninstall      Remove what 'install' put in place."
 	@echo "  build-ontology Rebuild iomoments-ontology.json from the YAML source."
 	@echo "  gate-ontology  build-ontology + audit-ontology --exit-nonzero-on-gap (D010)."
 	@echo "  gate-local     Full pre-push check: shellcheck + pytest + lints + ontology."
@@ -319,6 +337,30 @@ $(BUILD_DIR)/iomoments: src/iomoments.c $(C_HEADERS) $(BPF_OBJS) | $(BUILD_DIR)
 	$(CC_CLANG) $(CFLAGS_LINT_CLANG) -o $@ $< -lbpf -lelf -lz -lm
 
 iomoments-build: $(BUILD_DIR)/iomoments
+
+# ---------------------------------------------------------------------------
+# install / uninstall — FHS layout. Honors DESTDIR + PREFIX (see top of
+# this file). Installs the userspace binary plus both BPF object
+# variants (k=4 default + k=3 fallback) so the runtime variant
+# selection in src/iomoments.c works after install.
+# ---------------------------------------------------------------------------
+install: $(BUILD_DIR)/iomoments $(BPF_OBJS) $(BPF_K3_OBJS)
+	@if [ -z "$(BPF_OBJS)" ]; then \
+		echo "ERROR: no BPF objects built — run 'make iomoments-build' first." >&2; \
+		exit 1; \
+	fi
+	$(INSTALL) -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(LIBDIR)/iomoments"
+	$(INSTALL) -m 0755 $(BUILD_DIR)/iomoments "$(DESTDIR)$(BINDIR)/iomoments"
+	$(INSTALL) -m 0644 $(BPF_OBJS) "$(DESTDIR)$(LIBDIR)/iomoments/"
+	$(INSTALL) -m 0644 $(BPF_K3_OBJS) "$(DESTDIR)$(LIBDIR)/iomoments/"
+	@echo "iomoments installed to $(DESTDIR)$(BINDIR)/iomoments"
+	@echo "BPF objects in $(DESTDIR)$(LIBDIR)/iomoments/"
+
+uninstall:
+	rm -f "$(DESTDIR)$(BINDIR)/iomoments"
+	rm -f "$(DESTDIR)$(LIBDIR)/iomoments/iomoments.bpf.o"
+	rm -f "$(DESTDIR)$(LIBDIR)/iomoments/iomoments-k3.bpf.o"
+	rmdir --ignore-fail-on-non-empty "$(DESTDIR)$(LIBDIR)/iomoments" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # bpf-verify — static BTF inspection via bpftool. Does NOT load into the

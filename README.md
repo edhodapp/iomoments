@@ -211,15 +211,51 @@ Produces `build/iomoments` (userspace binary) and the two BPF
 objects `build/iomoments.bpf.o` (k=4) and
 `build/iomoments-k3.bpf.o` (k=3 fallback).
 
+### Install (optional)
+
+```
+sudo make install                       # default: PREFIX=/usr/local
+sudo make install PREFIX=/usr           # distro-style
+make install DESTDIR=/tmp/staging \
+            PREFIX=/usr                 # staged build for packagers
+```
+
+`make install` honors the GNU `DESTDIR` and `PREFIX` conventions.
+The binary lands at `$(PREFIX)/bin/iomoments`; the two BPF objects
+land at `$(PREFIX)/lib/iomoments/`. The userspace binary resolves
+its BPF objects via `/proc/self/exe`, so it works both in-tree
+(`./build/iomoments`) and after install (`/usr/local/bin/iomoments`)
+without any flag plumbing.
+
 ### Run
 
 ```
-sudo ./build/iomoments --duration=10 --window=100
+sudo ./build/iomoments --duration=10 --window=100   # in-tree
+sudo iomoments --duration=10 --window=100           # after install
 ```
 
 `sudo` is required for BPF program load + tracepoint attach. The
 report emits Level 1 moments, Level 2 Nyquist diagnostic, and the
 D007 verdict with per-signal breakdown.
+
+## Distribution
+
+iomoments is open source under AGPL-3.0-or-later. Source builds
+are the canonical install path — the Installation section above
+covers Ubuntu 24.04 LTS as the reference target, and other Linux
+distributions are expected to work with locally-substituted package
+names. `sudo make install` puts the binary on `$PATH` for users
+who want it system-wide.
+
+Convenience channels for users who'd rather not compile are
+planned, not yet shipped:
+
+- **GitHub release tarballs.** Pre-built `iomoments-x86_64-linux.tar.gz`
+  attached to tagged versions, ready to extract and run.
+- **Debian/Ubuntu `.deb`.** Ubuntu 24.04 LTS as the reference
+  target.
+
+Both will land before the first non-beta release.
 
 ## Roadmap (post-ship)
 

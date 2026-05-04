@@ -71,12 +71,14 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -90,14 +92,14 @@
 #include "pebay.h"
 #include "pebay_bpf.h"
 
-#define IOMOMENTS_BPF_OBJECT "build/iomoments.bpf.o"
+#define IOMOMENTS_BPF_OBJECT "iomoments.bpf.o"
 /*
  * k=3 fallback per D014 / #48 — drops the m4 update body so the
  * program fits stricter verifier budgets (6.17+). Tried only when
  * the default k=4 object fails to load. The verdict layer reads
  * `loaded_order` to YELLOW the m4-dependent signals.
  */
-#define IOMOMENTS_BPF_OBJECT_K3 "build/iomoments-k3.bpf.o"
+#define IOMOMENTS_BPF_OBJECT_K3 "iomoments-k3.bpf.o"
 #define IOMOMENTS_MAP_NAME "iomoments_summary"
 #define IOMOMENTS_TOPK_MAP_NAME "iomoments_topk_map"
 #define IOMOMENTS_DEFAULT_DURATION 10
@@ -111,6 +113,87 @@ static void stop_handler(int signo)
 {
 	(void)signo;
 	stop_flag = 1;
+}
+
+/*
+ * Resolve a BPF object basename ("iomoments.bpf.o") to a real path
+ * relative to where this binary actually lives — not relative to the
+ * caller's CWD. Tried in order:
+ *
+ *   1. Sibling of the running binary. Covers the dev workflow where
+ *      the binary and BPF objects share `build/`.
+ *   2. `${exe_dir}/../lib/iomoments/<basename>`. Covers `make install`
+ *      with the standard FHS layout (binary in `${PREFIX}/bin`, BPF
+ *      objects in `${PREFIX}/lib/iomoments/`).
+ *   3. The basename CWD-relative — last-ditch dev fallback.
+ *
+ * Writes the resolved path into `out` (size `out_sz`) and returns 0
+ * on success; -1 if no candidate exists.
+ */
+static int iomoments_resolve_bpf_object(const char *basename, char *out,
+					size_t out_sz)
+{
+	char exe[PATH_MAX];
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	struct stat st;
+	if (n > 0) {
+		exe[n] = '\0';
+		char *slash = strrchr(exe, '/');
+		if (slash != NULL) {
+			*slash = '\0';
+			int r = snprintf(out, out_sz, "%s/%s", exe, basename);
+			if (r > 0 && (size_t)r < out_sz &&
+			    stat(out, &st) == 0) {
+				return 0;
+			}
+			r = snprintf(out, out_sz, "%s/../lib/iomoments/%s", exe,
+				     basename);
+			if (r > 0 && (size_t)r < out_sz &&
+			    stat(out, &st) == 0) {
+				return 0;
+			}
+		}
+	}
+	int r = snprintf(out, out_sz, "%s", basename);
+	if (r > 0 && (size_t)r < out_sz && stat(out, &st) == 0) {
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * Resolve `basename` into a real path, open the BPF object, and load
+ * it. On any failure, prints a diagnostic to stderr and returns NULL;
+ * caller frees on success via bpf_object__close. `*load_errno_out`
+ * receives the load errno (0 on resolve/open failure) so callers can
+ * distinguish verifier rejections (E2BIG / EINVAL) from access /
+ * resource failures.
+ */
+static struct bpf_object *iomoments_open_load(const char *basename,
+					      int *load_errno_out)
+{
+	char path[PATH_MAX];
+	*load_errno_out = 0;
+	if (iomoments_resolve_bpf_object(basename, path, sizeof(path)) != 0) {
+		fprintf(stderr,
+			"iomoments: cannot locate %s — looked beside the"
+			" binary and in ../lib/iomoments/.\n",
+			basename);
+		return NULL;
+	}
+	struct bpf_object *obj = bpf_object__open_file(path, NULL);
+	if (!obj) {
+		fprintf(stderr, "iomoments: bpf_object__open_file(%s): %s\n",
+			path, strerror(errno));
+		return NULL;
+	}
+	int load_rc = bpf_object__load(obj);
+	if (load_rc != 0) {
+		*load_errno_out = -load_rc;
+		bpf_object__close(obj);
+		return NULL;
+	}
+	return obj;
 }
 
 /*
@@ -535,49 +618,32 @@ int main(int argc, char **argv)
 	 * rejections — surface them directly rather than silently
 	 * retry against k=3 and produce a misleading aggregate error. */
 	enum iomoments_moment_order loaded_order = IOMOMENTS_MOMENT_ORDER_K4;
+	int k4_errno = 0;
 	struct bpf_object *obj =
-		bpf_object__open_file(IOMOMENTS_BPF_OBJECT, NULL);
+		iomoments_open_load(IOMOMENTS_BPF_OBJECT, &k4_errno);
 	if (!obj) {
-		fprintf(stderr, "iomoments: bpf_object__open_file(%s): %s\n",
-			IOMOMENTS_BPF_OBJECT, strerror(errno));
-		return 3;
-	}
-	int load_rc = bpf_object__load(obj);
-	if (load_rc != 0) {
-		int load_errno = -load_rc;
-		bpf_object__close(obj);
-		obj = NULL;
-		if (load_errno == E2BIG || load_errno == EINVAL) {
-			fprintf(stderr,
-				"iomoments: k=4 variant rejected by verifier"
-				" (%s); falling back to k=3 (m4-dependent"
-				" signals will report YELLOW per D014).\n",
-				strerror(load_errno));
-			obj = bpf_object__open_file(IOMOMENTS_BPF_OBJECT_K3,
-						    NULL);
-			if (!obj) {
-				fprintf(stderr,
-					"iomoments: bpf_object__open_file(%s):"
-					" %s\n",
-					IOMOMENTS_BPF_OBJECT_K3,
-					strerror(errno));
-				return 3;
-			}
-			if (bpf_object__load(obj) != 0) {
-				fprintf(stderr, "iomoments: k=3 fallback also"
-						" rejected; verifier may need a"
-						" future k=2 variant.\n");
-				bpf_object__close(obj);
-				return 4;
-			}
-			loaded_order = IOMOMENTS_MOMENT_ORDER_K3;
-		} else {
+		if (k4_errno != E2BIG && k4_errno != EINVAL) {
 			fprintf(stderr,
 				"iomoments: bpf_object__load failed: %s"
 				" (need CAP_BPF / CAP_PERFMON or root?)\n",
-				strerror(load_errno));
+				strerror(k4_errno));
 			return 4;
 		}
+		fprintf(stderr,
+			"iomoments: k=4 variant rejected by verifier (%s);"
+			" falling back to k=3 (m4-dependent signals will"
+			" report YELLOW per D014).\n",
+			strerror(k4_errno));
+		int k3_errno = 0;
+		obj = iomoments_open_load(IOMOMENTS_BPF_OBJECT_K3, &k3_errno);
+		if (!obj) {
+			fprintf(stderr,
+				"iomoments: k=3 fallback also rejected (%s);"
+				" verifier may need a future k=2 variant.\n",
+				strerror(k3_errno));
+			return 4;
+		}
+		loaded_order = IOMOMENTS_MOMENT_ORDER_K3;
 	}
 
 	/*
