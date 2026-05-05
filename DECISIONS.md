@@ -1509,3 +1509,148 @@ range.
   with the 2026-04-29 three-distro probe results.
 
 **Status.** Active. The witness is shipping with this commit.
+
+### D017: PerformanceConstraint budget enforcement in the audit gate
+
+**Date.** 2026-05-05.
+
+**Refines.** D010 (audit-ontology as closing pre-push and CI gate)
+and D015 (test-results DAG with freshness invariant). Adds a fourth
+audit pass — budget compliance — alongside ref-resolution,
+status↔refs consistency, and freshness. D010 itself is unchanged.
+
+**Background.** The `PerformanceConstraint` model ships with a
+first-class `budget` field, a `direction` (max/min/equal), and a
+`metric` name that matches a key in `TestResult.measurements`. The
+perf producer (`tooling/perf_producer.py`) populates measurements
+from `scripts/measure_bpf_overhead.sh`. The audit reads the
+measurements as part of freshness checking but never compares them
+to the budget. Both the `PerformanceConstraint` docstring
+(`tooling/src/iomoments_ontology/models.py:108`) and the README's
+Roadmap explicitly call this out as deferred. The 2026-05-03
+HANDOFF entered the post-v0.1.0 work order as item (3) under "open
+work."
+
+Two ontology rows currently have measurement paths
+(`probe_phase_overhead`) or are spec-only without a producer
+(`pebay_update_cycles_per_sample`, `per_cpu_update_bytes`). Two
+ontology open questions are filed and deferred for cross-project
+alignment with fireasmserver: `performance_constraint_tolerance`
+and `performance_constraint_percentile`.
+
+**Decision.** The audit grows a new pass, `_run_perf_budget_pass`,
+that compares the latest `TestResult.measurements[row.metric]`
+value (per-environment) against `row.budget` according to
+`row.direction`. Violations populate
+`AuditReport.summary.perf_budget_violations` and gate the audit
+when a new CLI flag `--enforce-perf-budgets` is set. The flag
+defaults off so the existing audit behavior is preserved during
+rollout; the pre-push hook turns it on once the first row is
+promoted to `status="implemented"`.
+
+To make the existing perf measurement actually exercisable, the
+single `probe_phase_overhead` row is split into
+`probe_phase_overhead_issue` and `probe_phase_overhead_complete`,
+each bound to one producer-emitted metric key
+(`per_event_ns_issue`, `per_event_ns_complete` respectively). The
+two rows reflect the truth that issue and complete are separate
+code paths whose costs diverge ~2× in real runs (~412 ns vs.
+~187 ns per event on the post-v0.1.1 baseline). Collapsing them
+into a single budget hides which side regresses.
+
+The remaining two PerformanceConstraint rows
+(`pebay_update_cycles_per_sample`, `per_cpu_update_bytes`) stay at
+`status="spec"`. No producer measures them today. The audit's
+budget pass skips spec-status rows entirely (a row promotes to
+`implemented` only when a producer wires up). Building producers
+for the remaining rows is *not* part of this D-entry — it would
+open new tooling tracks (cycle counter access, accumulator-size
+introspection) and the no-new-projects discipline applies.
+
+**The two open questions stay deferred.** `tolerance` (per-row
+acceptable-variance band) and `percentile` (p50/p99 vs. mean) are
+both real perf-engineering concerns that would normally be wired
+into a v1 budget gate. We defer them because:
+
+- The gate runs only on Ed's laptop (single-author push lock; no
+  external contributors via repo policy). Run-to-run variance from
+  one machine is bounded enough that hard equality on the budget
+  is not pathologically flaky in practice.
+- The producer emits a mean (`run_time_ns / run_cnt`), not a
+  percentile. Promoting to p50/p99 means changing the producer's
+  output schema, which compounds with `measure_bpf_overhead.sh`'s
+  measurement methodology. A separate D-entry can pick that up.
+- Cross-project shape preservation: fireasmserver's
+  `PerformanceConstraint` carries the same fields. Adding tolerance
+  or percentile unilaterally diverges the cross-project audit
+  unification, which is a real cost to pay only when the
+  flake-rate forces it.
+
+The 2026-05-03 HANDOFF and the open-questions block in
+`iomoments-ontology.yaml` already document both deferrals. D017
+adopts that posture without re-litigating it.
+
+**Why this option, not the alternatives.** Three were considered:
+
+- **(a) Land tolerance + percentile in this same D-entry.**
+  Rejected — couples the gate's first cut to two open
+  cross-project alignment questions. Risks scope-creeping the
+  audit into a perf-engineering platform.
+- **(b) Skip the row split; keep `probe_phase_overhead` as one
+  row matched against the *max* of the two measurement keys.**
+  Rejected — hides which side of the BPF hot path regressed when
+  a violation triggers. Two rows is more honest and costs only
+  YAML lines.
+- **(c) Defer the gate entirely; ship measurement-only.** ✗
+  Rejected — measurements without comparison are exactly the
+  state we're already in. The thesis of D010 + D015 is that the
+  audit *closes* on its claims; an open-loop perf claim is a
+  category of claim the audit can't close on, which contradicts
+  the design.
+
+**Operational discipline.**
+
+- Adding a new `PerformanceConstraint` row with `status="spec"`
+  is free; it has no enforcement consequence until it promotes.
+- A row promotes to `status="implemented"` only when a producer
+  emits its `metric` key into `TestResult.measurements` and a
+  recent measurement satisfies `direction(budget)`. The promotion
+  IS the contract that the gate will refuse pushes which break
+  the budget.
+- A spurious flake (measurement variance, NUMA placement, thermal
+  throttling on the build host) surfaces as a budget violation;
+  the fix is to re-run `make bpf-overhead` and inspect the new
+  measurement before deciding whether to widen the budget. If
+  flakes persist, that's the trigger to un-defer
+  `performance_constraint_tolerance` — not to silently widen
+  every budget by a fudge factor.
+- Pre-push hook flips `--enforce-perf-budgets` on. Manual
+  `make audit-ontology` invocations stay default-off so
+  ad-hoc audits don't surprise the developer.
+
+**Cross-refs:**
+
+- D010 — audit-ontology as the closing pre-push and CI gate;
+  D017 adds the budget pass as a fourth check alongside
+  ref-resolution, status↔refs consistency, and freshness.
+- D015 — test-results DAG and freshness invariant; D017 reads
+  measurements off the same DAG.
+- `tooling/iomoments-ontology.yaml` — `performance_constraints:`
+  block; `probe_phase_overhead` row split; two `open_questions`
+  rows (tolerance, percentile) remain.
+- `tooling/src/iomoments_ontology/models.py:108` —
+  `PerformanceConstraint` definition; docstring's "future audit
+  enrichment" pointer is honored by D017.
+- `tooling/src/audit_ontology/audit.py` — new
+  `_run_perf_budget_pass` parallel to `_run_freshness_pass`.
+- `scripts/measure_bpf_overhead.sh` — produces the
+  `perf-summary.txt` keys consumed by the budget pass.
+- `tooling/perf_producer.py` — populates
+  `TestResult.measurements` from the perf summary.
+- 2026-05-03 HANDOFF — work order item (3) closes with this
+  D-entry.
+
+**Status.** Active. Shipping in five sub-commits: this D-entry,
+the audit pass + tests, the CLI flag + tests, the
+`probe_phase_overhead` row split + ontology JSON refresh, and the
+pre-push hook flip.
