@@ -3,7 +3,7 @@
 Exercises:
 - audit_ontology.git_helpers (head_sha, last_touch_file,
   is_ancestor_of_head, is_at_or_after) against a real tmp git repo.
-- audit_ontology.freshness._env_matches structural-subtype rule.
+- audit_ontology.env_match.env_matches structural-subtype rule.
 - audit_ontology.freshness.check_claim_freshness for each of D015
   §5's three failure modes plus the happy path.
 - audit_ontology.audit.run_audit with enforce_freshness on/off and
@@ -29,10 +29,10 @@ from audit_ontology.audit import (
 )
 from audit_ontology.cli import main as cli_main
 from audit_ontology.formatter import format_text
+from audit_ontology.env_match import env_matches
 from audit_ontology.freshness import (
     FreshnessIssue,
     FreshnessMode,
-    _env_matches,
     check_claim_freshness,
 )
 from iomoments_ontology import (
@@ -145,7 +145,7 @@ def test_is_at_or_after_strictly_later(tmp_path: Path) -> None:
     assert git_helpers.is_at_or_after(tmp_path, sha1, sha2) is False
 
 
-# --- _env_matches structural subtyping ---------------------------------
+# --- env_matches structural subtyping ---------------------------------
 
 
 def test_env_matches_empty_expected_wildcards() -> None:
@@ -154,31 +154,31 @@ def test_env_matches_empty_expected_wildcards() -> None:
         kind="vmtest", kernel="v6.18", distro="fedora",
     )
     expected = EnvironmentSpec(kind="vmtest")
-    assert _env_matches(actual, expected) is True
+    assert env_matches(actual, expected) is True
 
 
 def test_env_matches_non_empty_must_equal() -> None:
     actual = EnvironmentSpec(kind="vmtest", kernel="v6.18")
     expected = EnvironmentSpec(kind="vmtest", kernel="v5.15")
-    assert _env_matches(actual, expected) is False
+    assert env_matches(actual, expected) is False
 
 
 def test_env_matches_kind_mismatch() -> None:
     actual = EnvironmentSpec(kind="host")
     expected = EnvironmentSpec(kind="vmtest")
-    assert _env_matches(actual, expected) is False
+    assert env_matches(actual, expected) is False
 
 
 def test_env_matches_required_flag() -> None:
     actual = EnvironmentSpec(kind="host", flags={"perf": "1"})
     expected = EnvironmentSpec(kind="host", flags={"perf": "1"})
-    assert _env_matches(actual, expected) is True
+    assert env_matches(actual, expected) is True
 
 
 def test_env_matches_missing_required_flag() -> None:
     actual = EnvironmentSpec(kind="host")
     expected = EnvironmentSpec(kind="host", flags={"perf": "1"})
-    assert _env_matches(actual, expected) is False
+    assert env_matches(actual, expected) is False
 
 
 # --- check_claim_freshness ---------------------------------------------

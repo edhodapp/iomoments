@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from audit_ontology.audit import AuditReport, ConstraintReport
 from audit_ontology.freshness import FreshnessIssue, FreshnessMode
+from audit_ontology.perf_budget import PerfBudgetIssue, PerfBudgetMode
 from audit_ontology.resolver import Resolution, ResolvedRef
 
 
@@ -56,6 +57,41 @@ _MODE_HEADLINE = {
 }
 
 
+_PERF_HEADLINE = {
+    PerfBudgetMode.BUDGET_VIOLATED: "perf budget violated",
+    PerfBudgetMode.NO_MEASUREMENT: "no measurement for perf budget",
+}
+
+
+def _render_perf_budget_issue(issue: PerfBudgetIssue) -> list[str]:
+    """Render a single D017 perf-budget gap."""
+    headline = _PERF_HEADLINE[issue.mode]
+    env = issue.environment
+    env_desc = f"kind={env.kind!r}"
+    if env.kernel:
+        env_desc += f" kernel={env.kernel!r}"
+    if env.distro:
+        env_desc += f" distro={env.distro!r}"
+    if issue.measured is None:
+        measured_line = "   measured:         (none)"
+    else:
+        measured_line = (
+            f"   measured:         {issue.measured:g} {issue.unit}"
+        )
+    budget_str = f"{issue.direction} {issue.budget:g} {issue.unit}"
+    lines = [
+        f"×  perf.{issue.claim_name} — {headline}",
+        f"   metric:           {issue.metric}",
+        f"   budget:           {budget_str}",
+        measured_line,
+        f"   environment:      ({env_desc})",
+        f"   reason:           {issue.reason}",
+    ]
+    if issue.fix_recipe:
+        lines.append(f"   fix:              {issue.fix_recipe}")
+    return lines
+
+
 def _render_freshness_issue(issue: FreshnessIssue) -> list[str]:
     """Render a single freshness gap per D015 §5's three failure modes."""
     headline = _MODE_HEADLINE[issue.mode]
@@ -76,41 +112,53 @@ def _render_freshness_issue(issue: FreshnessIssue) -> list[str]:
     return lines
 
 
+def _render_freshness_section(report: AuditReport) -> list[str]:
+    if not report.freshness_issues:
+        return []
+    out = ["-" * 80, "freshness gaps (D015)", "-" * 80]
+    for issue in report.freshness_issues:
+        out.extend(_render_freshness_issue(issue))
+        out.append("")
+    return out
+
+
+def _render_perf_budget_section(report: AuditReport) -> list[str]:
+    if not report.perf_budget_issues:
+        return []
+    out = ["-" * 80, "perf budget gaps (D017)", "-" * 80]
+    for issue in report.perf_budget_issues:
+        out.extend(_render_perf_budget_issue(issue))
+        out.append("")
+    return out
+
+
+def _render_summary(report: AuditReport) -> list[str]:
+    s = report.summary
+    return [
+        "-" * 80,
+        "summary",
+        "-" * 80,
+        f"  total rows            : {s.total_rows}",
+        f"  rows with gap         : {s.rows_with_gap}",
+        f"  refs resolved         : {s.refs_total}",
+        f"  refs file_missing     : {s.refs_file_missing}",
+        f"  refs symbol_missing   : {s.refs_symbol_missing}",
+        f"  consistency violations: {s.consistency_violations}",
+        f"  freshness gaps        : {s.freshness_gaps}",
+        f"  perf budget gaps      : {s.perf_budget_violations}",
+        "",
+    ]
+
+
 def format_text(report: AuditReport) -> str:
     """Return the full audit report as a single printable string."""
     if not report.rows:
         return "Ontology is empty — nothing to audit.\n"
-
-    out: list[str] = []
-    out.append("=" * 80)
-    out.append("iomoments ontology audit")
-    out.append("=" * 80)
-    out.append("")
-
+    out: list[str] = ["=" * 80, "iomoments ontology audit", "=" * 80, ""]
     for row in report.rows:
         out.extend(_render_row(row))
         out.append("")
-
-    if report.freshness_issues:
-        out.append("-" * 80)
-        out.append("freshness gaps (D015)")
-        out.append("-" * 80)
-        for issue in report.freshness_issues:
-            out.extend(_render_freshness_issue(issue))
-            out.append("")
-
-    summary = report.summary
-    out.append("-" * 80)
-    out.append("summary")
-    out.append("-" * 80)
-    out.append(f"  total rows            : {summary.total_rows}")
-    out.append(f"  rows with gap         : {summary.rows_with_gap}")
-    out.append(f"  refs resolved         : {summary.refs_total}")
-    out.append(f"  refs file_missing     : {summary.refs_file_missing}")
-    out.append(f"  refs symbol_missing   : {summary.refs_symbol_missing}")
-    out.append(
-        f"  consistency violations: {summary.consistency_violations}",
-    )
-    out.append(f"  freshness gaps        : {summary.freshness_gaps}")
-    out.append("")
+    out.extend(_render_freshness_section(report))
+    out.extend(_render_perf_budget_section(report))
+    out.extend(_render_summary(report))
     return "\n".join(out)

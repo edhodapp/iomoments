@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from iomoments_ontology import (
+    PerformanceConstraint,
     TestResultsSnapshot,
     load_dag,
     load_test_results_dag,
@@ -32,6 +33,10 @@ from audit_ontology.freshness import (
     check_claim_freshness,
 )
 from audit_ontology.parser import parse_ref
+from audit_ontology.perf_budget import (
+    PerfBudgetIssue,
+    check_perf_budget,
+)
 from audit_ontology.resolver import Resolution, ResolvedRef, resolve_ref
 
 
@@ -67,6 +72,7 @@ class Summary:
     refs_symbol_missing: int = 0
     consistency_violations: int = 0
     freshness_gaps: int = 0
+    perf_budget_violations: int = 0
 
 
 @dataclass
@@ -76,12 +82,14 @@ class AuditReport:
     rows: list[ConstraintReport] = field(default_factory=list)
     summary: Summary = field(default_factory=Summary)
     freshness_issues: list[FreshnessIssue] = field(default_factory=list)
+    perf_budget_issues: list[PerfBudgetIssue] = field(default_factory=list)
 
     @property
     def has_any_gap(self) -> bool:
         return (
             self.summary.rows_with_gap > 0
             or self.summary.freshness_gaps > 0
+            or self.summary.perf_budget_violations > 0
         )
 
 
@@ -145,6 +153,7 @@ def run_audit(
     test_results_dag_path: Path | None = None,
     enforce_freshness: bool = False,
     bootstrap: bool = False,
+    enforce_perf_budgets: bool = False,
 ) -> AuditReport:
     """Run the audit end-to-end and return an AuditReport.
 
@@ -152,10 +161,19 @@ def run_audit(
     Default-off so the existing audit gate behavior is preserved
     until producers populate the test-results DAG.
 
+    Perf-budget checking (D017) is opt-in via
+    ``enforce_perf_budgets``. Default-off; pre-push wiring flips it
+    on once at least one PerformanceConstraint is at status
+    ``implemented`` or ``tested``. spec / deviation / n_a rows are
+    skipped regardless of the flag.
+
     ``bootstrap`` (D015 §8): when freshness IS enforced, treats
     missing-result issues as warnings (not gaps) — used during the
     producer-wiring window when partial coverage exists. The escape
     valve is removed in a follow-on commit once all producers wire.
+    Bootstrap does NOT apply to perf-budget violations: a row at
+    ``implemented`` is opting in to the gate, and a missing
+    measurement is a real gap, not a wiring transient.
     """
     dag = load_dag(str(dag_path), project_name=project_name)
     current = dag.get_current_node()
@@ -170,19 +188,47 @@ def run_audit(
         ("signal", list(ontology.diagnostic_signals)),
         ("verdict", list(ontology.verdict_nodes)),
     ]
+    _run_static_pass(report, sources, repo_root)
+    _run_dynamic_passes(
+        report, sources, ontology.performance_constraints,
+        test_results_dag_path, project_name, repo_root,
+        enforce_freshness, enforce_perf_budgets, bootstrap,
+    )
+    return report
+
+
+def _run_static_pass(
+    report: AuditReport,
+    sources: list[tuple[str, list[Any]]],
+    repo_root: Path,
+) -> None:
+    """Build a row + update summary for every claim, regardless of flags."""
     for kind, entries in sources:
         for entry in entries:
             row = _build_row(kind, entry, repo_root)
             report.rows.append(row)
             _update_summary(report.summary, row)
 
-    if enforce_freshness:
-        _run_freshness_pass(
-            report, sources, test_results_dag_path,
-            project_name, repo_root, bootstrap,
-        )
 
-    return report
+def _run_dynamic_passes(
+    report: AuditReport,
+    sources: list[tuple[str, list[Any]]],
+    perf_rows: list[PerformanceConstraint],
+    test_results_dag_path: Path | None,
+    project_name: str,
+    repo_root: Path,
+    enforce_freshness: bool,
+    enforce_perf_budgets: bool,
+    bootstrap: bool,
+) -> None:
+    """Snapshot-dependent passes; no-op if both flags off."""
+    if not (enforce_freshness or enforce_perf_budgets):
+        return
+    snapshot = _load_results_snapshot(test_results_dag_path, project_name)
+    if enforce_freshness:
+        _run_freshness_pass(report, sources, snapshot, repo_root, bootstrap)
+    if enforce_perf_budgets:
+        _run_perf_budget_pass(report, perf_rows, snapshot)
 
 
 def _load_results_snapshot(
@@ -204,15 +250,11 @@ def _load_results_snapshot(
 def _run_freshness_pass(
     report: AuditReport,
     sources: list[tuple[str, list[Any]]],
-    test_results_dag_path: Path | None,
-    project_name: str,
+    snapshot: TestResultsSnapshot,
     repo_root: Path,
     bootstrap: bool,
 ) -> None:
     """Apply freshness check to every claim and aggregate gaps."""
-    snapshot = _load_results_snapshot(
-        test_results_dag_path, project_name,
-    )
     for kind, entries in sources:
         for entry in entries:
             issues = check_claim_freshness(
@@ -243,3 +285,19 @@ def _run_freshness_pass(
                 gap_issues = issues
             report.freshness_issues.extend(issues)
             report.summary.freshness_gaps += len(gap_issues)
+
+
+def _run_perf_budget_pass(
+    report: AuditReport,
+    perf_rows: list[PerformanceConstraint],
+    snapshot: TestResultsSnapshot,
+) -> None:
+    """Apply D017 perf-budget check to every PerformanceConstraint.
+
+    Spec / deviation / n_a rows are skipped inside check_perf_budget;
+    no bootstrap escape valve (per run_audit's docstring rationale).
+    """
+    for row in perf_rows:
+        issues = check_perf_budget(row, snapshot)
+        report.perf_budget_issues.extend(issues)
+        report.summary.perf_budget_violations += len(issues)

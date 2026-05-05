@@ -34,14 +34,22 @@ from audit_ontology.audit import (
 from audit_ontology.consistency import check_status_refs_consistency
 from audit_ontology.formatter import format_text
 from audit_ontology.parser import ParsedRef, parse_ref
+from audit_ontology.perf_budget import (
+    PerfBudgetIssue,
+    PerfBudgetMode,
+    check_perf_budget,
+)
 from audit_ontology.resolver import ResolvedRef, Resolution, resolve_ref
 
 __all__ = [
     "AuditReport",
     "ConstraintReport",
     "ParsedRef",
+    "PerfBudgetIssue",
+    "PerfBudgetMode",
     "Resolution",
     "ResolvedRef",
+    "check_perf_budget",
     "check_status_refs_consistency",
     "format_text",
     "parse_ref",

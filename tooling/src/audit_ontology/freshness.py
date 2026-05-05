@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from audit_ontology import git_helpers
+from audit_ontology.env_match import env_matches
 from audit_ontology.parser import parse_ref
 from iomoments_ontology import (
     EnvironmentSpec,
@@ -75,27 +76,6 @@ class FreshnessIssue:
     fix_recipe: str
 
 
-_ENV_FIELDS = ("kind", "kernel", "distro", "arch")
-
-
-def _env_matches(actual: EnvironmentSpec, expected: EnvironmentSpec) -> bool:
-    """Return True iff ``actual`` is a structural subtype of ``expected``.
-
-    Per D015 §2's ``⊑`` operator: empty fields on the expected env
-    match any value on the actual; non-empty fields must equal.
-    Encoding the standard structural-subtyping rule used by the
-    audit's per-(ref, env) lookup.
-    """
-    for field_name in _ENV_FIELDS:
-        expected_v = getattr(expected, field_name)
-        if expected_v and getattr(actual, field_name) != expected_v:
-            return False
-    for k, v in expected.flags.items():
-        if actual.flags.get(k) != v:
-            return False
-    return True
-
-
 def _matching_results(
     snapshot: TestResultsSnapshot,
     verification_ref: str,
@@ -106,7 +86,7 @@ def _matching_results(
         r for r in snapshot.results
         if r.verification_ref == verification_ref
         and r.outcome == "pass"
-        and _env_matches(r.environment, expected_env)
+        and env_matches(r.environment, expected_env)
     ]
 
 
