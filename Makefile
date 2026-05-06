@@ -511,13 +511,19 @@ bpf-overhead-vm: $(BPF_OBJS) $(BPF_K3_OBJS)
 # perf measurement) had populated records satisfying every claim's
 # expected_environments. From this commit forward, ENV_NEVER_EXERCISED
 # and RUNNER_FORGOT are real signals that gate the push.
+#
+# --enforce-perf-budgets enables D017 perf-budget enforcement. Every
+# PerformanceConstraint at status=implemented/tested has its latest
+# measurement compared against budget per direction. Default-off
+# elsewhere (so manual `audit-ontology` stays advisory) but on here.
 # ---------------------------------------------------------------------------
 build-ontology: $(VENV_STAMP)
 	$(VENV)/bin/build-iomoments-ontology
 
 gate-ontology: build-ontology
 	$(VENV)/bin/audit-ontology --exit-nonzero-on-gap \
-		--enforce-freshness
+		--enforce-freshness \
+		--enforce-perf-budgets
 
 # ---------------------------------------------------------------------------
 # Meta.
