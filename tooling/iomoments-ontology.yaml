@@ -585,18 +585,21 @@ domain_constraints:
     description: >
       Every iomoments run emits a verdict. The verdict is NEVER
       silently elided, even when green — callers must be able to grep
-      for the verdict on every record. The print_report path always
-      calls print_verdict, which always emits the GREEN/YELLOW/AMBER/
-      RED tag plus per-signal breakdown.
+      for the verdict on every record. Both report paths
+      (print_report_text and print_report_json) unconditionally
+      emit the GREEN/YELLOW/AMBER/RED tag plus per-signal breakdown.
     entity_ids: [verdict]
     rationale: >
       D007 load-bearing thesis. iomoments_verdict_compute is invoked
       unconditionally in iomoments.c's main; the print path
-      unconditionally emits the verdict section.
+      unconditionally emits the verdict section in either text
+      (print_verdict) or JSON (print_verdict_json) form.
     implementation_refs:
       - "src/iomoments_verdict.h:iomoments_verdict_compute"
       - "src/iomoments.c:print_verdict"
-      - "src/iomoments.c:print_report"
+      - "src/iomoments.c:print_verdict_json"
+      - "src/iomoments.c:print_report_text"
+      - "src/iomoments.c:print_report_json"
     verification_refs:
       - "tests/c/test_verdict.c:test_e2e_stationary_should_be_green"
       - "tests/c/test_verdict.c:test_overall_is_worst_of_all"
