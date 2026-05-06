@@ -28,6 +28,24 @@ Each class runs `REPS` reps (default 3) for within-class variance.
 
 ## How to run
 
+### EC2 (recommended): one-shot provisioning + teardown
+
+`provision.sh` spins up a fresh `m5.large` (Ubuntu 22.04 LTS HWE,
+kernel 6.8) with a separate 50 GB gp3 EBS data volume, copies the
+locally-built iomoments binary + harness, runs all classes × reps,
+retrieves the output tree, and tears down everything (instance,
+volumes, SG, key pair). Single command from the repo root:
+
+```
+make iomoments-build       # ensure local binaries + BPF objects
+./scripts/calibration_d019/provision.sh
+```
+
+Cost ≈ $0.20 per run. Results land at
+`scripts/calibration_d019/out-ec2/<run_id>/`.
+
+### Local (manual): on a laptop or pre-provisioned host
+
 Requires root (CAP_BPF + CAP_PERFMON) and a raw block device:
 
 ```
