@@ -499,11 +499,12 @@ static void print_level2(const struct iomoments_level2_result *l2)
 	}
 }
 
-static void print_report(const struct iomoments_summary *global, int duration,
-			 int window_ms, size_t windows_captured,
-			 const struct iomoments_level2_result *l2,
-			 const struct iomoments_spectral_result *spec,
-			 const struct iomoments_verdict *verdict)
+static void print_report_text(const struct iomoments_summary *global,
+			      int duration, int window_ms,
+			      size_t windows_captured,
+			      const struct iomoments_level2_result *l2,
+			      const struct iomoments_spectral_result *spec,
+			      const struct iomoments_verdict *verdict)
 {
 	printf("\niomoments report (duration %d s, window %d ms)\n", duration,
 	       window_ms);
@@ -535,10 +536,161 @@ static void print_report(const struct iomoments_summary *global, int duration,
 	print_verdict(verdict);
 }
 
+/*
+ * Minimal JSON-string escaper. Writes a JSON-quoted string for `s`
+ * (including the surrounding quotes) to stdout. Handles the
+ * RFC 8259 control set ("\", "\"", BS/FF/LF/CR/TAB) plus other
+ * <0x20 chars as \u00xx. Sufficient for the rationale strings the
+ * D007 verdict layer emits (short ASCII), defensively safe if a
+ * future signal rationale grows a quote or backslash.
+ */
+static void print_json_string(const char *s)
+{
+	putchar('"');
+	for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+		switch (*p) {
+		case '"':
+			fputs("\\\"", stdout);
+			break;
+		case '\\':
+			fputs("\\\\", stdout);
+			break;
+		case '\b':
+			fputs("\\b", stdout);
+			break;
+		case '\f':
+			fputs("\\f", stdout);
+			break;
+		case '\n':
+			fputs("\\n", stdout);
+			break;
+		case '\r':
+			fputs("\\r", stdout);
+			break;
+		case '\t':
+			fputs("\\t", stdout);
+			break;
+		default:
+			if (*p < 0x20) {
+				printf("\\u%04x", *p);
+			} else {
+				putchar(*p);
+			}
+		}
+	}
+	putchar('"');
+}
+
+static void print_level2_json(const struct iomoments_level2_result *l2)
+{
+	printf(",\"level2\":{\"insufficient_data\":%s",
+	       l2->insufficient_data ? "true" : "false");
+	if (l2->insufficient_data) {
+		printf(",\"n_windows\":%zu}", l2->n_windows);
+		return;
+	}
+	printf(",\"n_windows\":%zu,"
+	       "\"var_of_windowed_mean\":%.6e,"
+	       "\"clt_predicted_var\":%.6e,"
+	       "\"variance_ratio\":%.6f,"
+	       "\"nyquist_confidence\":%.6f,"
+	       "\"autocorr\":{",
+	       l2->n_windows, l2->var_of_windowed_mean, l2->clt_predicted_var,
+	       l2->variance_ratio, l2->nyquist_confidence);
+	for (size_t li = 0; li < IOMOMENTS_LEVEL2_LAGS; li++) {
+		printf("%s\"k%zu\":%.6f", li == 0 ? "" : ",",
+		       iomoments_level2_lag_values[li], l2->autocorr[li]);
+	}
+	printf("}}");
+}
+
+static void print_spectral_json(const struct iomoments_spectral_result *spec)
+{
+	printf(",\"spectral\":{\"insufficient_data\":%s",
+	       spec->insufficient_data ? "true" : "false");
+	if (spec->insufficient_data) {
+		printf("}");
+		return;
+	}
+	printf(",\"min_ratio\":%.6f,\"min_ratio_idx\":%zu,\"points\":[",
+	       spec->min_ratio, spec->min_ratio_idx);
+	for (size_t i = 0; i < spec->n_points; i++) {
+		const struct iomoments_spectral_point *p = &spec->points[i];
+		printf("%s{\"k\":%zu,\"window_seconds\":%.6f,"
+		       "\"n_virtual_windows\":%zu,"
+		       "\"var_observed\":%.6e,\"var_predicted_clt\":%.6e,"
+		       "\"ratio\":%.6f}",
+		       i == 0 ? "" : ",", p->k, p->window_seconds,
+		       p->n_virtual_windows, p->var_observed,
+		       p->var_predicted_clt, p->ratio);
+	}
+	printf("]}");
+}
+
+static void print_verdict_json(const struct iomoments_verdict *v)
+{
+	printf(",\"verdict\":{\"overall\":");
+	print_json_string(iomoments_verdict_status_name(v->overall));
+	printf(",\"signals\":[");
+	for (size_t i = 0; i < v->n_signals; i++) {
+		const struct iomoments_verdict_signal *s = &v->signals[i];
+		printf("%s{\"name\":", i == 0 ? "" : ",");
+		print_json_string(s->name);
+		printf(",\"status\":");
+		print_json_string(iomoments_verdict_status_name(s->status));
+		printf(",\"rationale\":");
+		print_json_string(s->rationale);
+		printf("}");
+	}
+	printf("]}");
+}
+
+/*
+ * Machine-readable counterpart to print_report_text. Emits a single
+ * JSON object with the same fields the text path prints. Used by the
+ * D019 calibration harness and by anything downstream that wants
+ * structured iomoments output (spreadsheet ingest, Python analysis).
+ *
+ * Schema is documented inline by the field names; consumers should
+ * tolerate additional fields in future versions (additive only).
+ */
+static void print_report_json(const struct iomoments_summary *global,
+			      int duration, int window_ms,
+			      size_t windows_captured,
+			      const struct iomoments_level2_result *l2,
+			      const struct iomoments_spectral_result *spec,
+			      const struct iomoments_verdict *verdict,
+			      const char *loaded_order_name)
+{
+	printf("{\"duration_s\":%d,\"window_ms\":%d,\"loaded_order\":",
+	       duration, window_ms);
+	print_json_string(loaded_order_name);
+	printf(",\"samples\":%lu,\"windows_captured\":%zu", global->n,
+	       windows_captured);
+	if (global->n == 0) {
+		printf("}\n");
+		return;
+	}
+	double mean = iomoments_summary_mean(global);
+	double variance = iomoments_summary_variance(global);
+	double stddev = sqrt(variance);
+	double skew = iomoments_summary_skewness(global);
+	double kurt = iomoments_summary_excess_kurtosis(global);
+	printf(",\"moments\":{"
+	       "\"mean_ns\":%.6e,\"variance_ns2\":%.6e,\"stddev_ns\":%.6e,"
+	       "\"skewness\":%.6f,\"excess_kurtosis\":%.6f}",
+	       mean, variance, stddev, skew, kurt);
+	print_level2_json(l2);
+	print_spectral_json(spec);
+	print_verdict_json(verdict);
+	printf("}\n");
+}
+
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"Usage: %s [--duration=<secs>] [--window=<ms>] [--help]\n"
+		"Usage: %s [--duration=<secs>] [--window=<ms>] [--json]"
+		" [--help]\n"
 		"\n"
 		"  --duration=<secs>  Observation window in seconds"
 		" (default %d).\n"
@@ -549,6 +701,11 @@ static void usage(const char *argv0)
 		"                     time-series. Smaller windows give finer"
 		" Nyquist\n"
 		"                     resolution but more drain overhead.\n"
+		"  --json             Emit a single-line JSON object on stdout"
+		" instead of\n"
+		"                     the human-readable report. Used by D019"
+		" calibration\n"
+		"                     and other downstream consumers.\n"
 		"  --help             Show this help.\n"
 		"\n"
 		"Requires CAP_BPF + CAP_PERFMON (or root) to load the"
@@ -556,36 +713,62 @@ static void usage(const char *argv0)
 		argv0, IOMOMENTS_DEFAULT_DURATION, IOMOMENTS_DEFAULT_WINDOW_MS);
 }
 
-static int parse_args(int argc, char **argv, int *duration, int *window_ms)
+struct iomoments_cli_args {
+	int duration;
+	int window_ms;
+	int json_mode;
+};
+
+static int parse_long_arg(const char *arg, const char *prefix, long min,
+			  long max, const char *err_label, long *out)
 {
-	*duration = IOMOMENTS_DEFAULT_DURATION;
-	*window_ms = IOMOMENTS_DEFAULT_WINDOW_MS;
+	size_t plen = strlen(prefix);
+	if (strncmp(arg, prefix, plen) != 0) {
+		return 0;
+	}
+	char *end;
+	long v = strtol(arg + plen, &end, 10);
+	if (*end != '\0' || v < min || v > max) {
+		fprintf(stderr, "iomoments: %s must be %ld..%ld.\n", err_label,
+			min, max);
+		return -1;
+	}
+	*out = v;
+	return 1;
+}
+
+static int parse_args(int argc, char **argv, struct iomoments_cli_args *out)
+{
+	out->duration = IOMOMENTS_DEFAULT_DURATION;
+	out->window_ms = IOMOMENTS_DEFAULT_WINDOW_MS;
+	out->json_mode = 0;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 ||
 		    strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
 			return 1;
 		}
-		if (strncmp(argv[i], "--duration=", 11) == 0) {
-			char *end;
-			long v = strtol(argv[i] + 11, &end, 10);
-			if (*end != '\0' || v <= 0 || v > 3600) {
-				fprintf(stderr, "iomoments: --duration must be"
-						" 1..3600 seconds.\n");
-				return -1;
-			}
-			*duration = (int)v;
+		if (strcmp(argv[i], "--json") == 0) {
+			out->json_mode = 1;
 			continue;
 		}
-		if (strncmp(argv[i], "--window=", 9) == 0) {
-			char *end;
-			long v = strtol(argv[i] + 9, &end, 10);
-			if (*end != '\0' || v <= 0 || v > 60000) {
-				fprintf(stderr, "iomoments: --window must be"
-						" 1..60000 milliseconds.\n");
-				return -1;
-			}
-			*window_ms = (int)v;
+		long v = 0;
+		int rc = parse_long_arg(argv[i], "--duration=", 1, 3600,
+					"--duration (seconds)", &v);
+		if (rc < 0) {
+			return -1;
+		}
+		if (rc > 0) {
+			out->duration = (int)v;
+			continue;
+		}
+		rc = parse_long_arg(argv[i], "--window=", 1, 60000,
+				    "--window (ms)", &v);
+		if (rc < 0) {
+			return -1;
+		}
+		if (rc > 0) {
+			out->window_ms = (int)v;
 			continue;
 		}
 		fprintf(stderr, "iomoments: unknown arg %s\n", argv[i]);
@@ -597,15 +780,16 @@ static int parse_args(int argc, char **argv, int *duration, int *window_ms)
 
 int main(int argc, char **argv)
 {
-	int duration;
-	int window_ms;
-	int rc = parse_args(argc, argv, &duration, &window_ms);
+	struct iomoments_cli_args args;
+	int rc = parse_args(argc, argv, &args);
 	if (rc > 0) {
 		return 0;
 	}
 	if (rc < 0) {
 		return 2;
 	}
+	int duration = args.duration;
+	int window_ms = args.window_ms;
 
 	libbpf_set_print(libbpf_print_quiet);
 	signal(SIGINT, stop_handler);
@@ -739,8 +923,15 @@ int main(int argc, char **argv)
 	struct iomoments_verdict verdict;
 	iomoments_verdict_compute(&global, window_ring, windows_count, &l2,
 				  &spec, loaded_order, &verdict);
-	print_report(&global, duration, window_ms, windows_count, &l2, &spec,
-		     &verdict);
+	if (args.json_mode) {
+		const char *order_name =
+			loaded_order == IOMOMENTS_MOMENT_ORDER_K3 ? "k3" : "k4";
+		print_report_json(&global, duration, window_ms, windows_count,
+				  &l2, &spec, &verdict, order_name);
+	} else {
+		print_report_text(&global, duration, window_ms, windows_count,
+				  &l2, &spec, &verdict);
+	}
 
 	free(window_ring);
 	bpf_object__close(obj);
