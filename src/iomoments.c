@@ -93,6 +93,8 @@
 #include "pebay_bpf.h"
 
 #define IOMOMENTS_BPF_OBJECT "iomoments.bpf.o"
+#define IOMOMENTS_CONFIG_MAP_NAME "iomoments_config"
+#define IOMOMENTS_RAW_SAMPLES_MAP_NAME "iomoments_raw_samples"
 /*
  * k=3 fallback per D014 / #48 — drops the m4 update body so the
  * program fits stricter verifier budgets (6.17+). Tried only when
@@ -113,6 +115,116 @@ static void stop_handler(int signo)
 {
 	(void)signo;
 	stop_flag = 1;
+}
+
+/*
+ * Raw-sample dump state, opaque to run_drain_loop. raw_file is the
+ * append-only binary file receiving __u64 latency samples;
+ * raw_samples_written counts successful fwrites for the end-of-run
+ * report; raw_samples_lost increments on fwrite short-write (rare,
+ * disk-full / SIGPIPE). The ringbuf-side overflow is tracked by
+ * libbpf internally and surfaced via ring_buffer__free's epilogue.
+ */
+struct iomoments_raw_dump {
+	FILE *file;
+	uint64_t samples_written;
+	uint64_t samples_lost;
+};
+
+/*
+ * libbpf ring-buffer callback: each invocation receives one raw
+ * latency sample (8 bytes, __u64 ns). Append to the dump file.
+ * Return 0 unconditionally so the ringbuf consumer doesn't bail on
+ * a transient short-write — `samples_lost` records the loss for
+ * the end-of-run report.
+ *
+ * `data` is intentionally non-const: libbpf's
+ * ring_buffer_sample_fn typedef is
+ * `int (*)(void *ctx, void *data, size_t)`. Const here would
+ * require a function-pointer cast at ring_buffer__new and lose
+ * type checking for no real benefit.
+ */
+/* cppcheck-suppress constParameterCallback */
+static int handle_raw_sample(void *ctx, void *data, size_t data_sz)
+{
+	struct iomoments_raw_dump *d = ctx;
+	if (data_sz != sizeof(uint64_t)) {
+		d->samples_lost += 1;
+		return 0;
+	}
+	if (fwrite(data, sizeof(uint64_t), 1, d->file) == 1) {
+		d->samples_written += 1;
+	} else {
+		d->samples_lost += 1;
+	}
+	return 0;
+}
+
+/*
+ * Prepare the raw-sample dump path: open the file, flip the BPF
+ * config map to enable dumping, allocate the libbpf ring buffer
+ * consumer. Returns the consumer (caller frees with
+ * ring_buffer__free) or NULL on failure (with diagnostic on stderr;
+ * the file is closed before return so the caller doesn't have to).
+ */
+static struct ring_buffer *raw_dump_setup(struct bpf_object *obj,
+					  const char *path,
+					  struct iomoments_raw_dump *out)
+{
+	out->file = fopen(path, "wb");
+	if (!out->file) {
+		fprintf(stderr, "iomoments: open %s for raw dump: %s\n", path,
+			strerror(errno));
+		return NULL;
+	}
+	struct bpf_map *cfg_map =
+		bpf_object__find_map_by_name(obj, IOMOMENTS_CONFIG_MAP_NAME);
+	struct bpf_map *rb_map = bpf_object__find_map_by_name(
+		obj, IOMOMENTS_RAW_SAMPLES_MAP_NAME);
+	if (!cfg_map || !rb_map) {
+		fprintf(stderr, "iomoments: raw-dump maps missing in BPF "
+				"object;"
+				" rebuild iomoments.bpf.o.\n");
+		fclose(out->file);
+		out->file = NULL;
+		return NULL;
+	}
+	uint32_t cfg_key = 0;
+	uint32_t cfg_val = 1;
+	if (bpf_map_update_elem(bpf_map__fd(cfg_map), &cfg_key, &cfg_val,
+				BPF_ANY) != 0) {
+		fprintf(stderr, "iomoments: enable raw-dump config: %s\n",
+			strerror(errno));
+		fclose(out->file);
+		out->file = NULL;
+		return NULL;
+	}
+	struct ring_buffer *rb = ring_buffer__new(bpf_map__fd(rb_map),
+						  handle_raw_sample, out, NULL);
+	if (!rb) {
+		fprintf(stderr,
+			"iomoments: ring_buffer__new for raw samples: %s\n",
+			strerror(errno));
+		fclose(out->file);
+		out->file = NULL;
+		return NULL;
+	}
+	return rb;
+}
+
+static void raw_dump_teardown(struct ring_buffer *rb,
+			      struct iomoments_raw_dump *d)
+{
+	if (rb) {
+		ring_buffer__free(rb);
+	}
+	if (d->file) {
+		fclose(d->file);
+		d->file = NULL;
+	}
+	fprintf(stderr, "iomoments: raw-sample dump: %lu written, %lu lost.\n",
+		(unsigned long)d->samples_written,
+		(unsigned long)d->samples_lost);
 }
 
 /*
@@ -371,7 +483,7 @@ static int drain_one_window(int map_fd, int topk_map_fd, int ncpu,
 static size_t run_drain_loop(int map_fd, int topk_map_fd, int ncpu,
 			     int duration, int window_ms,
 			     struct iomoments_window *ring,
-			     size_t ring_capacity)
+			     size_t ring_capacity, struct ring_buffer *raw_rb)
 {
 	uint64_t window_ns =
 		(uint64_t)window_ms * (uint64_t)IOMOMENTS_NSEC_PER_MSEC;
@@ -410,6 +522,13 @@ static size_t run_drain_loop(int map_fd, int topk_map_fd, int ncpu,
 			}
 			count += 1;
 		}
+		/* Drain the raw-sample ringbuf if D019 capture is on.
+		 * Non-blocking poll (timeout 0): pulls everything ready,
+		 * returns immediately. Steady-state at 50K IOPS / 100 ms
+		 * windows is ~5K samples per poll, well under capacity. */
+		if (raw_rb) {
+			ring_buffer__poll(raw_rb, 0);
+		}
 	}
 
 	/* Final drain: capture samples since the last periodic drain. */
@@ -421,6 +540,9 @@ static size_t run_drain_loop(int map_fd, int topk_map_fd, int ncpu,
 				     &ring[count]) == 0) {
 			count += 1;
 		}
+	}
+	if (raw_rb) {
+		ring_buffer__poll(raw_rb, 100); /* drain residual */
 	}
 	return count;
 }
@@ -706,6 +828,13 @@ static void usage(const char *argv0)
 		"                     the human-readable report. Used by D019"
 		" calibration\n"
 		"                     and other downstream consumers.\n"
+		"  --dump-raw-samples=PATH\n"
+		"                     Append every block_rq_complete latency"
+		" (ns, uint64\n"
+		"                     little-endian) to PATH for offline"
+		" calibration analysis\n"
+		"                     (D019 ground truth). Disabled by "
+		"default.\n"
 		"  --help             Show this help.\n"
 		"\n"
 		"Requires CAP_BPF + CAP_PERFMON (or root) to load the"
@@ -717,6 +846,7 @@ struct iomoments_cli_args {
 	int duration;
 	int window_ms;
 	int json_mode;
+	const char *dump_raw_path; /* NULL when --dump-raw-samples is unset */
 };
 
 static int parse_long_arg(const char *arg, const char *prefix, long min,
@@ -737,38 +867,65 @@ static int parse_long_arg(const char *arg, const char *prefix, long min,
 	return 1;
 }
 
+/*
+ * Try a single argv entry against every recognized flag.
+ * Returns 1 if matched, 0 if no match (caller errors with "unknown arg"),
+ * -1 on parse error (caller exits non-zero).
+ */
+static int dispatch_arg(const char *arg, struct iomoments_cli_args *out)
+{
+	if (strcmp(arg, "--json") == 0) {
+		out->json_mode = 1;
+		return 1;
+	}
+	if (strncmp(arg, "--dump-raw-samples=", 19) == 0) {
+		const char *path = arg + 19;
+		if (path[0] == '\0') {
+			fprintf(stderr, "iomoments: --dump-raw-samples= needs"
+					" a path.\n");
+			return -1;
+		}
+		out->dump_raw_path = path;
+		return 1;
+	}
+	long v = 0;
+	int rc = parse_long_arg(arg, "--duration=", 1, 3600,
+				"--duration (seconds)", &v);
+	if (rc < 0) {
+		return -1;
+	}
+	if (rc > 0) {
+		out->duration = (int)v;
+		return 1;
+	}
+	rc = parse_long_arg(arg, "--window=", 1, 60000, "--window (ms)", &v);
+	if (rc < 0) {
+		return -1;
+	}
+	if (rc > 0) {
+		out->window_ms = (int)v;
+		return 1;
+	}
+	return 0;
+}
+
 static int parse_args(int argc, char **argv, struct iomoments_cli_args *out)
 {
 	out->duration = IOMOMENTS_DEFAULT_DURATION;
 	out->window_ms = IOMOMENTS_DEFAULT_WINDOW_MS;
 	out->json_mode = 0;
+	out->dump_raw_path = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 ||
 		    strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
 			return 1;
 		}
-		if (strcmp(argv[i], "--json") == 0) {
-			out->json_mode = 1;
-			continue;
-		}
-		long v = 0;
-		int rc = parse_long_arg(argv[i], "--duration=", 1, 3600,
-					"--duration (seconds)", &v);
+		int rc = dispatch_arg(argv[i], out);
 		if (rc < 0) {
 			return -1;
 		}
 		if (rc > 0) {
-			out->duration = (int)v;
-			continue;
-		}
-		rc = parse_long_arg(argv[i], "--window=", 1, 60000,
-				    "--window (ms)", &v);
-		if (rc < 0) {
-			return -1;
-		}
-		if (rc > 0) {
-			out->window_ms = (int)v;
 			continue;
 		}
 		fprintf(stderr, "iomoments: unknown arg %s\n", argv[i]);
@@ -891,6 +1048,21 @@ int main(int argc, char **argv)
 		return 7;
 	}
 
+	struct iomoments_raw_dump raw_dump = {
+		.file = NULL,
+		.samples_written = 0,
+		.samples_lost = 0,
+	};
+	struct ring_buffer *raw_rb = NULL;
+	if (args.dump_raw_path) {
+		raw_rb = raw_dump_setup(obj, args.dump_raw_path, &raw_dump);
+		if (!raw_rb) {
+			free(window_ring);
+			bpf_object__close(obj);
+			return 9;
+		}
+	}
+
 	fprintf(stderr,
 		"iomoments: attached; sampling for %d s, %d ms drain"
 		" cadence (~%zu windows)...\n",
@@ -898,8 +1070,9 @@ int main(int argc, char **argv)
 
 	size_t windows_count = run_drain_loop(map_fd, topk_map_fd, ncpu,
 					      duration, window_ms, window_ring,
-					      ring_capacity);
+					      ring_capacity, raw_rb);
 	if (windows_count == SIZE_MAX) {
+		raw_dump_teardown(raw_rb, &raw_dump);
 		free(window_ring);
 		bpf_object__close(obj);
 		return 8;
@@ -933,6 +1106,7 @@ int main(int argc, char **argv)
 				  &l2, &spec, &verdict);
 	}
 
+	raw_dump_teardown(raw_rb, &raw_dump);
 	free(window_ring);
 	bpf_object__close(obj);
 	return 0;

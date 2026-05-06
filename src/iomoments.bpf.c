@@ -113,6 +113,40 @@ struct {
 	__uint(value_size, sizeof(struct iomoments_topk));
 } iomoments_topk_map SEC(".maps");
 
+/*
+ * Calibration-only: when iomoments_config[0] is non-zero, every
+ * latency sample is also pushed to iomoments_raw_samples (a ring
+ * buffer userspace drains to a binary file). Used by D019 to
+ * obtain ground-truth raw latencies on the same sampling path
+ * iomoments uses, so the calibration claim is independent of
+ * fio's userspace timing or blktrace's separate kernel hook.
+ *
+ * Default value 0; userspace flips to 1 only when --dump-raw-
+ * samples=PATH is set. The conditional add ~5 verifier steps to
+ * iomoments_rq_complete; well inside the 1M budget on every
+ * supported kernel.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+} iomoments_config SEC(".maps");
+
+/*
+ * 16 MiB ring buffer for raw __u64 latency samples (8 bytes each
+ * = ~2M samples capacity). At 50K IOPS sustained, that's ~40 s of
+ * buffering; userspace polls every per-window drain cadence
+ * (default 100 ms) so steady-state usage is well under capacity.
+ * Overflow on bursty workloads surfaces as a non-zero
+ * bpf_ringbuf_output return; the BPF program ignores it (sample
+ * lost is the right behaviour over blocking the hot path).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 16 * 1024 * 1024);
+} iomoments_raw_samples SEC(".maps");
+
 SEC("tp_btf/block_rq_issue")
 int BPF_PROG(iomoments_rq_issue, struct request *rq)
 {
@@ -181,6 +215,16 @@ int BPF_PROG(iomoments_rq_complete, struct request *rq, unsigned int error,
 		bpf_map_lookup_elem(&iomoments_topk_map, &key);
 	if (t) {
 		iomoments_topk_insert(t, latency_ns);
+	}
+
+	/* Calibration path (D019): if userspace toggled raw-sample
+	 * dump on, push latency_ns to the ringbuf. ringbuf overflow
+	 * is silently dropped (better to lose a calibration sample
+	 * than block the I/O hot path). */
+	const __u32 *cfg = bpf_map_lookup_elem(&iomoments_config, &key);
+	if (cfg && *cfg) {
+		bpf_ringbuf_output(&iomoments_raw_samples, &latency_ns,
+				   sizeof(latency_ns), 0);
 	}
 	return 0;
 }
