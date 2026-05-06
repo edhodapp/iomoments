@@ -51,8 +51,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help=(
             "Exit non-zero if any gap (missing ref, consistency "
-            "violation, or freshness gap if --enforce-freshness) is "
-            "found. Default exits 0 regardless."
+            "violation, freshness gap if --enforce-freshness, or "
+            "perf-budget gap if --enforce-perf-budgets) is found. "
+            "Default exits 0 regardless."
         ),
     )
     parser.add_argument(
@@ -65,13 +66,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--enforce-perf-budgets",
+        action="store_true",
+        help=(
+            "Enable D017 perf-budget checking. Default off — "
+            "PerformanceConstraint rows at status=implemented/tested "
+            "are checked against the latest TestResult.measurements; "
+            "violations and missing measurements are reported as gaps."
+        ),
+    )
+    parser.add_argument(
         "--bootstrap",
         action="store_true",
         help=(
             "D015 §8 escape valve: when --enforce-freshness is set, "
             "downgrade missing-result and never-exercised gaps to "
             "warnings. Used during the producer-wiring window. Stale "
-            "results (real freshness regressions) still gate."
+            "results (real freshness regressions) still gate. Does "
+            "NOT apply to --enforce-perf-budgets (per D017)."
         ),
     )
     parser.add_argument(
@@ -80,8 +92,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=_DEFAULT_TEST_RESULTS_DAG,
         help=(
             "Test-results DAG JSON path (default: "
-            f"{_DEFAULT_TEST_RESULTS_DAG}). Only consulted when "
-            "--enforce-freshness is set."
+            f"{_DEFAULT_TEST_RESULTS_DAG}). Consulted when "
+            "--enforce-freshness or --enforce-perf-budgets is set."
         ),
     )
     return parser.parse_args(argv)
@@ -106,16 +118,18 @@ def main(argv: list[str] | None = None) -> int:
     """
     argv_list = sys.argv[1:] if argv is None else list(argv)
     args = _parse_args(argv_list)
+    needs_results_dag = (
+        args.enforce_freshness or args.enforce_perf_budgets
+    )
     try:
         report = run_audit(
             args.dag, args.repo_root,
             test_results_dag_path=(
-                args.test_results_dag
-                if args.enforce_freshness
-                else None
+                args.test_results_dag if needs_results_dag else None
             ),
             enforce_freshness=args.enforce_freshness,
             bootstrap=args.bootstrap,
+            enforce_perf_budgets=args.enforce_perf_budgets,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"audit-ontology: tooling error: {exc}", file=sys.stderr)

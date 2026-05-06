@@ -23,6 +23,7 @@ from audit_ontology import (
     format_text,
     run_audit,
 )
+from audit_ontology.cli import main as cli_main
 from audit_ontology.perf_budget import _direction_satisfied
 from iomoments_ontology import (
     EnvironmentSpec,
@@ -384,3 +385,104 @@ def test_format_text_omits_perf_budget_section_when_clean(
     rendered = format_text(report)
     assert "perf budget gaps (D017)" not in rendered
     assert "perf budget gaps      : 0" in rendered
+
+
+def test_format_text_no_unit_when_measured_none(
+    tmp_path: Path,
+) -> None:
+    """NO_MEASUREMENT issue should not append unit after '(none)'."""
+    row = _row(budget=100.0, direction="max")
+    dag_path = _make_dag(tmp_path, [row])
+    tr_path = _make_results_dag(tmp_path, TestResultsSnapshot())
+    report = run_audit(
+        dag_path=dag_path,
+        repo_root=tmp_path,
+        test_results_dag_path=tr_path,
+        enforce_perf_budgets=True,
+    )
+    rendered = format_text(report)
+    assert "measured:         (none)" in rendered
+    assert "(none) ns" not in rendered
+
+
+# --- CLI ---------------------------------------------------------------
+
+
+def test_cli_default_no_perf_budget_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Bare invocation: perf-budget pass doesn't run; summary count = 0."""
+    row = _row(budget=100.0, direction="max")
+    dag_path = _make_dag(tmp_path, [row])
+    snapshot = TestResultsSnapshot(results=[_result("m", 9999.0)])
+    tr_path = _make_results_dag(tmp_path, snapshot)
+    rc = cli_main([
+        "--dag", str(dag_path),
+        "--repo-root", str(tmp_path),
+        "--test-results-dag", str(tr_path),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "perf budget gaps      : 0" in out
+
+
+def test_cli_enforce_perf_budgets_violation_gates(
+    tmp_path: Path,
+) -> None:
+    """--enforce-perf-budgets + violation + --exit-nonzero-on-gap → 1."""
+    row = _row(budget=100.0, direction="max")
+    dag_path = _make_dag(tmp_path, [row])
+    snapshot = TestResultsSnapshot(results=[_result("m", 9999.0)])
+    tr_path = _make_results_dag(tmp_path, snapshot)
+    rc = cli_main([
+        "--dag", str(dag_path),
+        "--repo-root", str(tmp_path),
+        "--test-results-dag", str(tr_path),
+        "--enforce-perf-budgets",
+        "--exit-nonzero-on-gap",
+    ])
+    assert rc == 1
+
+
+def test_cli_enforce_perf_budgets_clean_passes(
+    tmp_path: Path,
+) -> None:
+    """--enforce-perf-budgets + measurement under budget: no perf gap.
+
+    Note: synthetic row has empty refs at status=implemented, which
+    surfaces as a consistency violation. Without --exit-nonzero-on-gap,
+    rc is 0 regardless.
+    """
+    row = _row(budget=100.0, direction="max")
+    dag_path = _make_dag(tmp_path, [row])
+    snapshot = TestResultsSnapshot(results=[_result("m", 50.0)])
+    tr_path = _make_results_dag(tmp_path, snapshot)
+    rc = cli_main([
+        "--dag", str(dag_path),
+        "--repo-root", str(tmp_path),
+        "--test-results-dag", str(tr_path),
+        "--enforce-perf-budgets",
+    ])
+    assert rc == 0
+
+
+def test_cli_bootstrap_does_not_apply_to_perf_budgets(
+    tmp_path: Path,
+) -> None:
+    """--bootstrap + --enforce-perf-budgets: bootstrap is freshness-only.
+
+    Per D017: a missing measurement on an implemented row is a real
+    gap, not a wiring transient. --bootstrap must not paper over it.
+    """
+    row = _row(budget=100.0, direction="max")
+    dag_path = _make_dag(tmp_path, [row])
+    tr_path = _make_results_dag(tmp_path, TestResultsSnapshot())
+    rc = cli_main([
+        "--dag", str(dag_path),
+        "--repo-root", str(tmp_path),
+        "--test-results-dag", str(tr_path),
+        "--enforce-perf-budgets",
+        "--bootstrap",
+        "--exit-nonzero-on-gap",
+    ])
+    assert rc == 1
