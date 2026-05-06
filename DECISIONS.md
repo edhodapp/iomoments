@@ -1654,3 +1654,158 @@ adopts that posture without re-litigating it.
 the audit pass + tests, the CLI flag + tests, the
 `probe_phase_overhead` row split + ontology JSON refresh, and the
 pre-push hook flip.
+
+### D018: math-layer calibration set — known distributions, analytical truths, tolerance bands
+
+**Date.** 2026-05-05.
+
+**Refines.** D006 (moments emitted in raw + log space) and D007
+(verdict layer thresholds) by pinning the calibration evidence
+that supports threshold-band assignments. Neither D006 nor D007
+is changed; D018 supplies the pre-condition without which their
+threshold bands are theory-only.
+
+**Background.** The README's Roadmap names "calibration validation
+against real workloads" as the highest-leverage open work for the
+project, with the rationale that verdict thresholds (Carleman ratio
+bands, Hill α boundaries, JB cutoffs) were chosen from theory + a
+small synthetic-fixture set. Before testing whether the verdict
+*layer* classifies workloads correctly, we need to verify the
+*moments themselves* are computed correctly on distributions whose
+analytical moments are known — the precondition for any verdict-
+threshold claim. D018 establishes that moment-correctness suite at
+the math layer (deterministic, no I/O hardware required, runs as
+pytest). System-layer calibration with real `fio` workloads is
+deferred to a follow-on D-entry.
+
+**Decision.** A pinned set of ten known distributions
+(``tests/test_calibration_moments.py`` ``_FIXTURES``) covers four
+shape classes:
+
+  - **Light-tailed**: ``Normal(0, 1)``, ``Normal(3, 2)``,
+    ``Uniform(0, 1)`` — sanity baselines where iomoments must
+    converge tightly.
+  - **Asymmetric / log-normal-ish**: ``LogNormal(σ=0.5)``,
+    ``LogNormal(σ=1.0)``, ``Exponential(λ=1)`` — the regime real
+    I/O latency typically lives in.
+  - **Pareto Type I across the existence boundaries**:
+    ``α ∈ {4.5, 3.5, 2.5, 1.5}`` — the deliberate boundary
+    tester. α=4.5 has all four moments; α=3.5 loses kurtosis;
+    α=2.5 loses skewness; α=1.5 has only mean.
+
+For each fixture, the test pins (a) the analytical (or
+scipy-computable-to-high-precision) population moments for
+whichever moments exist at that distribution; (b) ``None`` for
+moments that don't exist (these are explicitly *not* asserted on);
+and (c) a distribution-specific tolerance band documenting how
+tightly the N=100,000 sample moments converge.
+
+The Python Pébay reference at ``tooling/src/iomoments_oracle/``
+is the system under test. It is a line-for-line port of
+``src/pebay.h`` (D005). Calibration validates the *algorithm*; the
+C path is independently validated against this oracle by
+``tests/test_pebay_ref.py`` (the existing C-driver shell-out).
+That separation keeps the calibration claim a property of the
+algorithm rather than of either implementation in isolation.
+
+**The moment-existence policy.** Sample estimates of population
+moments that don't exist for a distribution are noise that
+converges to nothing. Asserting either direction ("the sample skew
+should be near X" / "the sample skew should be near zero") would
+be asserting on noise. The policy: every fixture's
+``expected_<moment>`` is ``None`` if the population moment doesn't
+exist, and the test skips the assertion entirely. A future reader
+who wants to add a fixture is required to reason about which
+moments exist, populate ``None`` for the rest, and document why.
+
+**The tolerance-band policy.** Tolerances are *distribution-
+specific*, not uniform, because heavy-tail sample moments converge
+slowly even on moments that do exist. Concretely:
+
+  - Pareto α=3.5 sample skew at N=100K lands ~50% below population
+    truth (the 8th moment governs sample-skew variance and
+    doesn't exist at α=3.5).
+  - Pareto α=4.5 sample kurt at N=100K lands ~75% below population
+    truth (same reason at the kurtosis layer).
+  - LogNormal σ=1.0 sample kurt at N=100K lands ~50% below
+    population truth (true kurtosis ≈ 110 from
+    ``e^(4σ²) + 2e^(3σ²) + 3e^(2σ²) - 6``).
+
+These wide tolerances are the *finding*, not a workaround — they
+document the convergence behaviour of plain sample moments on
+near-boundary tails. The verdict layer's job (Hill α flag, JB
+flag, half-split flag) is to refuse moment-based summaries on
+those tails rather than report confident numbers. D018's
+tolerance bands and D007's verdict thresholds are paired: a
+fixture where the moments converge well must also receive a
+GREEN verdict in a future D019 verdict-layer calibration suite,
+and a fixture where the moments converge poorly must receive
+AMBER/RED.
+
+**Why this option, not the alternatives.** Three were considered:
+
+- **(a) System-layer first.** Generate real ``fio`` workloads on
+  pinned hardware, capture iomoments BPF output, compare verdicts.
+  Rejected as the *first* step — the math-layer correctness has to
+  hold before any system-level claim makes sense, and system-layer
+  results are entangled with hardware (NVMe gen, SSD wear, NUMA
+  placement). Math-layer first gives a clean signal in pytest.
+  System-layer is a deferred follow-on.
+- **(b) C-only calibration via ``tests/c/test_calibration.c``.**
+  Rejected because deterministic seeded sample generation across
+  scipy-equivalent distributions is significantly more code in C,
+  and the calibration tests are about *the algorithm* not *the C
+  implementation* (the latter is covered by
+  ``tests/c/test_pebay.c`` against a small fixture set). The
+  Python oracle + scipy ground truth is the cleanest expression
+  of the calibration question.
+- **(c) Test against numpy/scipy descriptive stats on the same
+  sample.** Rejected as the *primary* assertion because it tests
+  agreement between Pébay and numpy on the *same N=100K sample*,
+  not against the *theoretical* population moments. The latter is
+  the calibration claim; the former is a sanity check (which the
+  suite also runs, separately, as
+  ``test_oracle_agrees_with_numpy_on_normal_sample``).
+
+**Operational discipline.**
+
+- Adding a fixture requires reasoning about moment existence and
+  picking tolerance bands appropriate for the distribution's tail.
+  A fixture that asserts on a non-existent moment with a tight
+  tolerance is a *bug*, not a tighter calibration — it'd fail
+  randomly across seeds.
+- Tolerance bands document the *current* convergence behaviour. If
+  a future change to the Pébay implementation tightens convergence
+  (e.g., switching to a Welford-Knuth variant with better
+  numerical conditioning), the test that previously passed at a
+  loose tolerance is the place to record the improvement — tighten
+  the band so future regressions surface.
+- The math-layer calibration suite is **not** wired into the audit
+  gate. A failure surfaces as a normal pytest failure on the
+  pre-push hook, not as a perf-budget gap. Calibration is
+  fundamental; budget compliance is incremental.
+- System-layer calibration (``fio`` on real hardware) is the next
+  natural extension. When it lands as D019, the math-layer
+  fixtures stay as the algorithmic baseline.
+
+**Cross-refs:**
+
+- D005 — Python numerical oracle origin; D018 expands the oracle
+  from "test-only delegation to the C driver" into a real
+  Python Pébay implementation under ``tooling/src/iomoments_oracle/``.
+- D006 — moments emitted in raw + log space; D018's calibration
+  set covers the raw-space side. Log-space calibration via
+  ``LogNormal`` is implicit (the log of a log-normal is normal,
+  whose moments are textbook).
+- D007 — verdict layer thresholds; D018 is the pre-condition
+  evidence supporting their threshold-band assignments.
+- ``tests/test_calibration_moments.py`` — the suite itself.
+- ``tooling/src/iomoments_oracle/__init__.py`` — Python Pébay
+  reference (the SUT).
+- ``src/pebay.h`` — the C source the Python oracle ports.
+- README Roadmap — names "calibration validation against real
+  workloads" as the highest-leverage open work; D018 supplies the
+  math-layer half of that work.
+
+**Status.** Active. The math-layer calibration suite is shipping
+with this D-entry. System-layer (D019) is queued.

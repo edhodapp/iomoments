@@ -20,7 +20,8 @@ Why a Python reference exists alongside the C implementation:
 3. If the C implementation drifts in a way the C tests don't catch,
    the Python oracle becomes the second witness in a future
    "compare C-side moments against Python-side moments on the same
-   sample" producer. (Not built today; tracked in MEMORY.)
+   sample" producer. Not built today; deferred to a follow-on of
+   DECISIONS.md D018 (math-layer calibration set).
 
 Variable naming mirrors ``src/pebay.h`` exactly (``m1..m4``,
 ``delta``, ``delta_n``, ``term1``) so a side-by-side read is
