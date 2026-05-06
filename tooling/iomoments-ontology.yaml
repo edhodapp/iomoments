@@ -1085,18 +1085,60 @@ performance_constraints:
     rationale: "Placeholder budget; refine with first measurement."
     status: spec
 
-  - name: probe_phase_overhead
+  - name: probe_phase_overhead_issue
     description: >
-      Diagnostic probe phase must not dominate the BPF hot path. The
-      diagnostic layer is load-bearing (D007) but can't be so
-      expensive that users disable it.
+      BPF tp_btf probe on block_rq_issue must stay cheap enough to
+      run permanently on the I/O hot path. The diagnostic layer is
+      load-bearing (D007) but can't be so expensive that users
+      disable it. Issue-side and complete-side are tracked
+      separately because they are different code paths and their
+      per-event costs diverge ~2× in real runs.
     entity_ids: [probe]
-    metric: probe_overhead_ns
+    metric: per_event_ns_issue
     budget: 500.0
     unit: ns
     direction: max
-    rationale: "D007 diagnostic layer must stay cheap enough to stay on."
-    status: spec
+    measured_via: "scripts/measure_bpf_overhead.sh (D014 perf discipline)"
+    rationale: >
+      D007 diagnostic layer must stay cheap enough to stay on. D017
+      §Decision splits this from the originally-spec'd combined
+      probe_phase_overhead row so each side of the BPF hot path has
+      its own budget; collapsing them hides which side regresses.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_issue"
+    verification_refs:
+      - "scripts/measure_bpf_overhead.sh"
+    expected_environments:
+      - kind: host-perf
+        fix_recipe: "sudo make bpf-overhead"
+    status: implemented
+
+  - name: probe_phase_overhead_complete
+    description: >
+      BPF tp_btf probe on block_rq_complete (the side that does the
+      Pébay update + ring-buffer push) must stay cheap enough to run
+      permanently on the I/O hot path. Sibling row to
+      probe_phase_overhead_issue; same budget, different code path.
+    entity_ids: [probe]
+    metric: per_event_ns_complete
+    budget: 500.0
+    unit: ns
+    direction: max
+    measured_via: "scripts/measure_bpf_overhead.sh (D014 perf discipline)"
+    rationale: >
+      Same as probe_phase_overhead_issue — D007 + D017 §Decision.
+      The complete-side does more work (Pébay m1..m4 update, ring
+      push) so it carries more of the budget under load; the budget
+      itself is identical until measurement justifies different
+      thresholds.
+    implementation_refs:
+      - "src/iomoments.bpf.c:iomoments_rq_complete"
+    verification_refs:
+      - "scripts/measure_bpf_overhead.sh"
+    expected_environments:
+      - kind: host-perf
+        fix_recipe: "sudo make bpf-overhead"
+    status: implemented
 
   - name: per_cpu_update_bytes
     description: >
