@@ -1,0 +1,23 @@
+; D019 Class A — well-behaved (target verdict: GREEN).
+;
+; Sequential 4K random reads on the data volume at ~2K IOPS.
+; Bypasses page cache (direct=1) so latency reflects the EBS path,
+; not Linux's read-ahead. Rate-limited well below gp3's 3K IOPS
+; baseline so no throttling kicks in. Result should be a tight
+; single-mode latency distribution near log-normal.
+
+[global]
+ioengine=io_uring
+direct=1
+group_reporting=1
+time_based=1
+runtime=90
+filename=${IOMOMENTS_DEVICE}
+randseed=42
+output-format=json
+
+[baseline_4k_read]
+rw=randread
+bs=4k
+iodepth=4
+rate_iops=2000

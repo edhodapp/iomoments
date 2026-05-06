@@ -1,0 +1,25 @@
+; D019 Class C — bimodal by block-size mix (target verdict: YELLOW).
+;
+; Random reads with bsrange 4k..256k drives a 64x range in I/O
+; size at the EBS path. 4K reads complete in ~1 ms (IOPS-limited);
+; 256K reads complete in ~5–15 ms (bandwidth-limited). Result is
+; a bimodal latency distribution by construction. iomoments'
+; half_split_moment_stability and edgeworth_pdf_consistency
+; signals should fire and emit YELLOW with a "moments miss
+; bimodal structure" rationale.
+
+[global]
+ioengine=io_uring
+direct=1
+group_reporting=1
+time_based=1
+runtime=90
+filename=${IOMOMENTS_DEVICE}
+randseed=42
+output-format=json
+
+[bimodal_blocksize_read]
+rw=randread
+bsrange=4k-256k
+iodepth=8
+rate_iops=4000
