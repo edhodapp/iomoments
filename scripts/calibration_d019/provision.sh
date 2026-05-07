@@ -247,29 +247,45 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${PUBLIC_IP}" \
 
 # ---------------------------------------------------------------------------
 # Run the harness on the instance
+#
+# stdbuf -oL forces tee's stdout to line-buffer; without it, the
+# pipe wedges full-buffer and ssh emits the harness's progress
+# only at exit (or in 4 KB chunks). Real-time visibility matters
+# during the 16 min run so we can tell whether class B/C are
+# tripping iomoments or fio at the moment they happen.
+#
+# After the harness, chown the out tree + harness.log to the ssh
+# user so scp can read them — the harness ran under sudo so
+# every captured file is owned by root.
 # ---------------------------------------------------------------------------
 echo "[run] launching harness on EC2 (will take ~16 min)..." >&2
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${PUBLIC_IP}" "
     cd ${TMP_REMOTE}
     sudo IOMOMENTS_DEVICE=/dev/nvme1n1 \
          ./scripts/calibration_d019/run.sh \
-         2>&1 | tee /tmp/harness.log
+         2>&1 | stdbuf -oL tee /tmp/harness.log
+    HARNESS_RC=\${PIPESTATUS[0]}
+    sudo chown -R ${SSH_USER}:${SSH_USER} \
+        ${TMP_REMOTE}/scripts/calibration_d019/out /tmp/harness.log
+    exit \"\${HARNESS_RC}\"
 "
 
 # ---------------------------------------------------------------------------
-# Retrieve outputs
+# Retrieve outputs (run regardless of harness rc — partial data
+# from a failed run is still useful for debugging)
 # ---------------------------------------------------------------------------
-mkdir -p "${RESULTS_DIR}"
-echo "[retrieve] pulling results to ${RESULTS_DIR}/${RUN_ID}/" >&2
 mkdir -p "${RESULTS_DIR}/${RUN_ID}"
+echo "[retrieve] pulling results to ${RESULTS_DIR}/${RUN_ID}/" >&2
 scp -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR -r \
     "${SSH_USER}@${PUBLIC_IP}:${TMP_REMOTE}/scripts/calibration_d019/out" \
-    "${RESULTS_DIR}/${RUN_ID}/" >/dev/null
+    "${RESULTS_DIR}/${RUN_ID}/" >/dev/null || \
+    echo "[retrieve] WARNING: out/ scp failed (partial harness run?)" >&2
 scp -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
     "${SSH_USER}@${PUBLIC_IP}:/tmp/harness.log" \
-    "${RESULTS_DIR}/${RUN_ID}/" >/dev/null
+    "${RESULTS_DIR}/${RUN_ID}/" >/dev/null || \
+    echo "[retrieve] WARNING: harness.log scp failed" >&2
 
 echo "" >&2
 echo "[done] D019 calibration run ${RUN_ID} retrieved." >&2
