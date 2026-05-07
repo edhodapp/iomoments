@@ -38,6 +38,13 @@ dev = [
     "scipy-stubs>=1.17",
     # PyYAML's inline stubs live in the types-PyYAML package.
     "types-PyYAML>=6.0",
+    # AWS CLI v1 — used by scripts/aws_tracer.sh (D016 cloud-faithfulness
+    # probe) and scripts/calibration_d019/provision.sh (D019 calibration
+    # provisioning). Pinned to the venv (.venv/bin/aws) so the scripts
+    # don't depend on a system-wide install. AWS CLI v2's PyPI package
+    # is unmaintained; v1 still receives bug-fix releases and works for
+    # the EC2 / IAM / EBS calls these scripts make.
+    "awscli>=1.40",
 ]
 
 [build-system]
