@@ -193,11 +193,18 @@ if [ "${ready}" -eq 0 ]; then
 fi
 
 echo "[ssh] installing prerequisites (fio, libbpf1)..." >&2
+# apt output is captured to /tmp/apt.log on the instance and surfaced
+# to local stderr via the ERR trap so a teardown-on-failure path
+# doesn't lose the diagnostic. Acquire::Retries=3 handles transient
+# repo blips (the first run hit one and lost ~$0.01 to it).
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${PUBLIC_IP}" '
     set -e
-    sudo apt-get update -y >/tmp/apt.log 2>&1
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        fio libbpf1 libelf1 zlib1g >>/tmp/apt.log 2>&1
+    APT_LOG=/tmp/apt.log
+    trap "echo \"--- apt log ---\" >&2; tail -50 \"$APT_LOG\" >&2 || true" ERR
+    sudo apt-get -o Acquire::Retries=3 update -y >"$APT_LOG" 2>&1
+    sudo DEBIAN_FRONTEND=noninteractive \
+        apt-get -o Acquire::Retries=3 install -y \
+        fio libbpf1 libelf1 zlib1g >>"$APT_LOG" 2>&1
     echo "fio: $(fio --version)"
     echo "kernel: $(uname -r)"
     # Wait for the data volume to appear (NVMe attach can be a few s post-boot).
