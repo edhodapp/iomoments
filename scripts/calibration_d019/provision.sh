@@ -33,10 +33,16 @@ PROJECT_TAG="iomoments-calibration-d019"
 INSTANCE_TYPE="m5.large"
 ROOT_VOLUME_GB="20"
 DATA_VOLUME_GB="50"
-# Ubuntu 22.04 LTS (jammy) HWE, kernel 6.8 — same AMI Canonical
-# the AWS-tracer probe uses for its 22.04 entry.
+# Ubuntu 24.04 LTS (noble), kernel 6.8 / 6.11 HWE.
+#
+# 24.04 NOT 22.04: the laptop's iomoments binary links libbpf.so.1
+# (libbpf 1.x). Jammy ships libbpf0 (pre-1.0) — SONAME mismatch
+# means the prebuilt binary won't dlopen at all. Noble ships
+# libbpf1 1.3+ which matches the laptop's build host. Cross-distro
+# calibration (re-running on jammy + AL2023) is queued; for the
+# first cut, single distro that matches the binary's link target.
 AMI_OWNER="099720109477"
-AMI_NAME_PATTERN="ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*"
+AMI_NAME_PATTERN="ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-amd64-server-*"
 SSH_USER="ubuntu"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -204,7 +210,7 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${PUBLIC_IP}" '
     sudo apt-get -o Acquire::Retries=3 update -y >"$APT_LOG" 2>&1
     sudo DEBIAN_FRONTEND=noninteractive \
         apt-get -o Acquire::Retries=3 install -y \
-        fio libbpf1 libelf1 zlib1g >>"$APT_LOG" 2>&1
+        fio libbpf1 libelf1t64 zlib1g >>"$APT_LOG" 2>&1
     echo "fio: $(fio --version)"
     echo "kernel: $(uname -r)"
     # Wait for the data volume to appear (NVMe attach can be a few s post-boot).
