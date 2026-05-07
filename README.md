@@ -266,7 +266,7 @@ vmtest pass on every kernel in the supported matrix.
   D015 captures perf measurements but doesn't yet compare them
   against `probe_phase_overhead` etc. budgets.
 
-Design log: **`DECISIONS.md`** (D001 through D018).
+Design log: **`DECISIONS.md`** (D001 through D019).
 
 ## License and contributions
 

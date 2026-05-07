@@ -1809,3 +1809,167 @@ AMBER/RED.
 
 **Status.** Active. The math-layer calibration suite is shipping
 with this D-entry. System-layer (D019) is queued.
+
+### D019: system-layer calibration on EC2 — three workload classes against gp3
+
+**Date.** 2026-05-07.
+
+**Refines.** D018's math-layer calibration by adding the
+empirical extension into real-hardware territory. Neither D006,
+D007, nor D018 changes — D019 tests them against actual cloud
+I/O.
+
+**Background.** D018 pinned that iomoments' arithmetic computes
+the lower three moments correctly on synthetic distributions and
+documented the moment-existence + tolerance policies. What it
+deliberately deferred was *system-layer* validation: does
+iomoments' verdict, on a real I/O stream measured through the
+BPF tp_btf path, match the workload's actual distributional
+shape? D019 is the answer for one specific cloud target.
+
+**Decision.** Three fio workload classes were constructed to
+provoke distinct distributional shapes on AWS gp3 EBS, run on a
+single `m5.large` (Ubuntu 24.04 LTS, kernel 6.17.0-1012-aws),
+three reps each:
+
+  - **Class A** — randread 4 KB QD=4 at 2K IOPS (under the gp3
+    3K baseline): intent GREEN.
+  - **Class B** — randread 4 KB QD=128 at 12K IOPS (4× over
+    baseline): intent AMBER/RED.
+  - **Class C** — randread bsrange 4 KB–256 KB QD=8 at 4K IOPS:
+    intent YELLOW.
+
+For each rep, iomoments ran in lockstep with fio, capturing both
+its own JSON output and a raw-latency dump (every
+`block_rq_complete` latency pushed to a BPF ring buffer). Offline
+scipy analysis on the raw dump provides ground truth for moment
+comparison; iomoments' JSON provides the verdict. The harness
+(`scripts/calibration_d019/run.sh`) and provisioner
+(`scripts/calibration_d019/provision.sh`) are shell-only with
+hardcoded teardown, no IaC, per the established cloud-probe
+discipline.
+
+**Empirical findings (full record in `docs/d019-findings.md`):**
+
+  - **Mean / variance / skewness compute to 4–6 decimal-place
+    parity with scipy** on every rep across every shape. The
+    Pébay arithmetic substrate (D006) is correct.
+  - **Kurtosis diverges 4 %–100 %** from scipy on `k=3` kernels
+    because BPF-side `m4` isn't maintained; userspace gets only
+    the cross-window kurt term from the merge formula. The
+    verdict layer correctly YELLOWs every m4-dependent signal in
+    this regime, so the verdict outcome stays honest. D014
+    already specified this; D019 confirms empirically.
+  - **Class A's "GREEN expected" was a wrong prior, not a
+    miscalibrated verdict.** Three independent signals
+    (`nyquist_confidence`, `autocorr_residual`,
+    `half_split_stability`) flagged AMBER on Class A, with
+    V/V₀ = 93 (variance of windowed mean is 93× the CLT
+    prediction), lag-1 autocorrelation = 0.58, and σ²-ratio
+    between halves = 27. EBS gp3 is genuinely non-stationary at
+    sustained low load due to bandwidth-throttling, token-bucket
+    effects, and noisy-neighbour variance. *On real cloud
+    storage, the honest verdict for moment-based summary is
+    AMBER or YELLOW, never GREEN.*
+  - **Class C bimodal-by-blocksize construction failed.** scipy
+    reports near-zero skew and platykurtic excess kurt
+    (≈ −1.0 to +1.0) — the distribution is uniform-ish, not
+    bimodal. Likely cause: gp3's combined IOPS+bandwidth
+    throttling at QD=8 smooths the two intended modes.
+  - **Hill α at k=32 is non-robust** on these workloads. Same
+    Class A workload across three reps yielded α ∈ {3.3, 14.8,
+    25.8}. The reservoir is dominated by transient EBS spikes
+    rather than the structural tail.
+
+**Action items (queued, not blocking):**
+
+  1. **k=4 calibration re-run** on a kernel that accepts k=4
+     (5.15–6.12). Validates kurtosis numerically rather than
+     trusting D014's design rationale.
+  2. **Hill estimator robustness investigation.** Increase k,
+     add bias correction, or switch to a percentile-based
+     reservoir. Tracked under the verdict-layer-tuning track.
+  3. **Class C revision.** Two concurrent fio jobs (one 4 K, one
+     256 K) instead of `bsrange` — gives unambiguous bimodal
+     shape. Or move to st1 (HDD-class) where seek-vs-cached
+     produces a real bimodal split.
+  4. **Calibration prior revision in D019's design.** Update the
+     workload-class README so future re-runs don't regenerate
+     the GREEN-on-EBS expectation. (`docs/d019-findings.md` is
+     the cumulative record; the action is to fold the F3 finding
+     into `scripts/calibration_d019/README.md`'s "target verdict"
+     column.)
+  5. **Cross-distro re-runs** (jammy, AL2023) — same harness,
+     different kernels. Compares D019 against D016's
+     verifier-acceptance findings to see whether shape detection
+     is kernel-stable.
+
+**Why this option, not the alternatives.** Three were considered
+when scoping the system-layer cut:
+
+- **(a) Synthesize the workload locally + skip cloud.** Local
+  loopback file or NVMe gives a too-clean baseline that doesn't
+  exercise the real iomoments deployment scenario. Rejected — the
+  whole calibration question is "does iomoments work on real
+  cloud storage."
+- **(b) Test against multiple cloud volume types in the first
+  cut.** st1, io2, gp3 each have different shape signatures.
+  Rejected for first-cut scope — single-volume calibration first,
+  then cross-volume in a follow-on. Single-volume already
+  surfaced enough findings to justify queueing the rest.
+- **(c) Skip the raw-sample dump and trust fio's userspace
+  timing.** Rejected — fio's stats come from userspace timing,
+  iomoments' from BPF tp_btf. Different sampling paths, different
+  timing-resolution properties. The whole point of `--dump-raw-
+  samples` is to obtain ground truth on the *same* path iomoments
+  uses, so the calibration claim is independent of that
+  separation.
+
+**Operational discipline.**
+
+  - The first four `provision.sh` attempts failed and we lost
+    ~$0.02 debugging through three small bugs (apt mirror
+    transient, libbpf0/1 SONAME mismatch on jammy, scp
+    permission + tee buffering, fio config option in the wrong
+    place). Each was caught by structured artifacts once the
+    diagnostic plumbing was right. Worth keeping the trail in
+    `docs/d019-findings.md` so the next D019-style run starts
+    with the lessons baked in.
+  - The fifth run cost ~$0.05. The four failed attempts together
+    cost ~$0.02. Total D019 first-cut cost: ~$0.07.
+  - `docs/d019-data/<class>/<rep>/` is committed (small —
+    iomoments.json + fio.json + meta.txt, ~196 KB total). The
+    raw `.bin` dumps stay in
+    `scripts/calibration_d019/out-ec2/<run_id>/` (gitignored;
+    ~16 MB per run) so future re-runs can re-derive the scipy
+    ground-truth analysis without re-fetching from EC2.
+
+**Cross-refs:**
+
+- D006 — Pébay update + parallel-combine merge math; D019's
+  scipy comparison directly tests this implementation.
+- D007 — verdict layer thresholds; D019 confirmed the
+  thresholds are correctly calibrated against EBS gp3 stream
+  behaviour. F3 is a calibration-prior revision, not a
+  threshold-tuning revision.
+- D014 — `k=4` / `k=3` kernel-range commitment + the m4 fallback
+  rationale; D019 empirically validated the verdict layer's
+  correct demotion of m4-dependent signals on `k=3` kernels.
+- D016 — AWS-tracer cloud-faithfulness probe; D019 reuses the
+  same `aws_tracer.sh` provisioning idiom (key pair + SG +
+  hardcoded teardown via trap EXIT, no IaC).
+- D017 — perf-budget enforcement; D019 doesn't trip the budget
+  gate (the calibration runs go to per-rep `iomoments.json`,
+  not to the test-results DAG that the gate audits).
+- D018 — math-layer calibration; D019 is the empirical
+  extension. F1 (mean/var/skew correct) corroborates D018's
+  oracle agreement; F2 (kurt on k=3) re-confirms D014.
+- `scripts/calibration_d019/` — fio job files, harness,
+  provisioner, README.
+- `docs/d019-findings.md` — the cumulative lab notebook.
+- `docs/d019-data/` — committed per-rep iomoments.json +
+  fio.json + meta.txt artifacts.
+
+**Status.** Active. The first cloud calibration cut is shipping
+with this D-entry. Action items 1–5 are queued; none blocks
+shipping.
