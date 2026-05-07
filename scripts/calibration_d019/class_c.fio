@@ -16,7 +16,6 @@ time_based=1
 runtime=90
 filename=${IOMOMENTS_DEVICE}
 randseed=42
-output-format=json
 
 [bimodal_blocksize_read]
 rw=randread

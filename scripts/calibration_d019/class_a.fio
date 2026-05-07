@@ -14,7 +14,6 @@ time_based=1
 runtime=90
 filename=${IOMOMENTS_DEVICE}
 randseed=42
-output-format=json
 
 [baseline_4k_read]
 rw=randread
